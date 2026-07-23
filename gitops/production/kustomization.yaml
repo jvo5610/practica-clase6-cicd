@@ -6,9 +6,9 @@ resources:
 images:
   - name: formatec-api
     newName: ghcr.io/jvo5610/practica-clase6-cicd
-    newTag: sha-be31bb20bdf5b525534e63e8ae0710bfcfbe4c6f
+    newTag: sha-eff0b025b7706b562dece36221cd35fe2a067895
 labels:
   - pairs:
-      app.kubernetes.io/version: sha-be31bb20bdf5b525534e63e8ae0710bfcfbe4c6f
+      app.kubernetes.io/version: sha-eff0b025b7706b562dece36221cd35fe2a067895
     includeSelectors: false
     includeTemplates: true
