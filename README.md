@@ -41,6 +41,9 @@ No se utiliza:
 Argo CD consulta GitHub desde el cluster mediante conexiones salientes. GitHub
 Actions nunca se conecta al cluster local.
 
+Por eso el laboratorio funciona detrás de NAT y no requiere abrir puertos en el
+router.
+
 # 1. Qué contiene el repositorio
 
 ```text
