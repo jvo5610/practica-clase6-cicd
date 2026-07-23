@@ -1,16 +1,21 @@
-FROM node:20-alpine AS build
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HOME=/home/app
 
 WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci
-COPY src ./src
-COPY scripts ./scripts
-RUN npm run build
 
-FROM nginx:alpine
+RUN addgroup --system app && \
+    adduser --system --home /home/app --ingroup app app
 
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-COPY --from=build /app/dist /usr/share/nginx/html
+COPY requirements.txt .
+RUN pip install --no-cache-dir --requirement requirements.txt
 
-EXPOSE 80
+COPY --chown=app:app app ./app
 
+USER app
+
+EXPOSE 8000
+
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "2", "--threads", "2", "--access-logfile", "-", "app:create_app()"]
