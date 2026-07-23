@@ -183,7 +183,10 @@ jobs:
 
   production:
     name: 5 · Desplegar producción
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.ref == 'refs/heads/main' &&
+      vars.PROD_DEPLOY_ENABLED == 'true'
     needs: publish
     runs-on: ubuntu-latest
 
