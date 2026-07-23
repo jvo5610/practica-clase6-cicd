@@ -2,7 +2,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: formatec-api
-  namespace: __NAMESPACE__
   labels:
     app: formatec-api
 spec:
@@ -20,24 +19,24 @@ spec:
       labels:
         app: formatec-api
     spec:
-      imagePullSecrets:
-        - name: ghcr-pull
       securityContext:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: api
-          image: __IMAGE__
+          image: formatec-api:bootstrap
           imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 8000
           env:
             - name: APP_ENV
-              value: __ENVIRONMENT__
+              value: production
             - name: APP_VERSION
-              value: __VERSION__
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['app.kubernetes.io/version']
           readinessProbe:
             httpGet:
               path: /health
@@ -66,20 +65,4 @@ spec:
             capabilities:
               drop:
                 - ALL
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: formatec-api
-  namespace: __NAMESPACE__
-  labels:
-    app: formatec-api
-spec:
-  type: ClusterIP
-  selector:
-    app: formatec-api
-  ports:
-    - name: http
-      port: 80
-      targetPort: http
 

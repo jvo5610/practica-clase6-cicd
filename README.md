@@ -1,93 +1,63 @@
-# Laboratorio: GitHub Actions y Kubernetes local sin exposición pública
+# Laboratorio desde cero: CI/CD con GitHub Actions y Argo CD
 
-Esta práctica implementa un flujo CI/CD completo para una API Flask:
+Esta práctica parte de:
+
+- una cuenta de GitHub;
+- Docker Desktop con un cluster Kubernetes local;
+- Git y una terminal Bash.
+
+Al finalizar tendrás:
 
 ```text
 Pull request
-  → análisis estático
+  → Ruff
+  → Bandit
   → unit tests
-  → imagen en GHCR
-  → namespace dev efímero en Docker Desktop Kubernetes
+  → Docker Compose
   → regresión HTTP
-  → listo para merge
-  → aprobación
-  → namespace production local
-  → regresión post-deploy
+  → Listo para merge
+
+Merge a main
+  → nueva validación
+  → imagen inmutable en GHCR
+  → actualización de la rama gitops
+  → Argo CD detecta el cambio
+  → despliegue en Docker Desktop Kubernetes
+  → smoke test PostSync
 ```
 
-El cluster Kubernetes no recibe conexiones desde Internet:
+No se utiliza:
 
-- no se crea Ingress;
-- no se crea Service `LoadBalancer`;
-- no se crea Service `NodePort`;
-- la API usa únicamente Service `ClusterIP`;
-- los tests abren temporalmente un `port-forward` en `127.0.0.1`;
-- el túnel se cierra al terminar el job;
-- el router doméstico no necesita publicar puertos.
+- runner self-hosted;
+- SSH;
+- VPN;
+- webhook;
+- Ingress;
+- LoadBalancer;
+- NodePort;
+- IP pública;
+- Argo CD expuesto a Internet.
 
-> “Sin exposición a Internet” significa que no existen conexiones entrantes
-> hacia el cluster. El equipo sí necesita conexiones salientes HTTPS hacia
-> GitHub y GHCR para recibir jobs y descargar imágenes.
+Argo CD consulta GitHub desde el cluster mediante conexiones salientes. GitHub
+Actions nunca se conecta al cluster local.
 
-# Arquitectura del laboratorio
-
-Se utilizan dos tipos de runner.
-
-| Trabajo | Runner | Motivo |
-| --- | --- | --- |
-| Ruff, Bandit y unit tests | GitHub-hosted | Entorno limpio y descartable |
-| Construcción y publicación | GitHub-hosted | Puede publicar directamente en GHCR |
-| Kubernetes dev | Self-hosted local | Tiene acceso al contexto `docker-desktop` |
-| Kubernetes production | Self-hosted local | Tiene acceso al cluster local |
-
-El runner self-hosted inicia una conexión saliente hacia GitHub. GitHub no
-inicia una conexión hacia tu notebook.
-
-# Flujo del pull request
-
-Cuando se abre o actualiza un PR hacia `main`:
-
-1. GitHub ejecuta Ruff.
-2. GitHub ejecuta Bandit.
-3. GitHub ejecuta los unit tests.
-4. GitHub construye la imagen.
-5. GitHub publica `sha-<commit>` y `pr-<número>` en GHCR.
-6. El runner local recibe el job.
-7. Crea el namespace `dev-pr-<número>`.
-8. Crea un pull secret temporal para GHCR.
-9. Despliega dos réplicas de la API.
-10. Espera el rollout.
-11. Abre un túnel solamente en `127.0.0.1:18080`.
-12. Ejecuta la regresión HTTP.
-13. Cierra el túnel.
-14. Elimina el namespace completo.
-15. El check **Listo para merge** informa el resultado.
-
-# Flujo de producción
-
-Después del merge a `main`:
-
-1. Se repiten análisis, unit tests y build.
-2. Se publica la imagen exacta `sha-<commit>`.
-3. El job referencia el entorno protegido `production`.
-4. GitHub solicita aprobación.
-5. El runner local despliega en el namespace `production`.
-6. Kubernetes realiza un RollingUpdate.
-7. Se ejecuta la regresión post-deploy.
-8. Si falla, el workflow ejecuta `kubectl rollout undo`.
-9. Si pasa, el deployment queda ejecutándose localmente.
-
-# Parte 1 — Revisar el repositorio
-
-## Paso 1. Identificar los archivos
+# 1. Qué contiene el repositorio
 
 ```text
 .
-├── .github/
-│   ├── actionlint.yaml
-│   └── workflows/cicd.yml
+├── .github/workflows/cicd.yml
 ├── app/__init__.py
-├── k8s/app.yaml
+├── gitops/
+│   ├── argocd/application.yaml
+│   └── production/kustomization.yaml
+├── k8s/base/
+│   ├── deployment.yaml
+│   ├── kustomization.yaml
+│   ├── service.yaml
+│   └── smoke-test.yaml
+├── scripts/
+│   ├── bootstrap-argocd.sh
+│   └── verify-gitops.sh
 ├── tests/
 │   ├── regression/test_api_contract.py
 │   └── unit/test_app.py
@@ -98,104 +68,71 @@ Después del merge a `main`:
 └── requirements.txt
 ```
 
-Responsabilidad de cada archivo:
+## Responsabilidades
 
-| Archivo | Responsabilidad |
+| Componente | Responsabilidad |
 | --- | --- |
-| `app/__init__.py` | API Flask |
-| `Dockerfile` | Imagen ejecutable |
-| `compose.yaml` | Desarrollo local sin Kubernetes |
-| `k8s/app.yaml` | Deployment y Service internos |
-| `tests/unit` | Pruebas dentro del proceso Python |
-| `tests/regression` | Pruebas contra una API desplegada |
-| `cicd.yml` | Orquestación completa |
+| GitHub Actions | Integración continua y promoción |
+| Docker Compose | Entorno de regresión previo al merge |
+| GHCR | Registro de imágenes |
+| Rama `gitops` | Estado deseado de producción |
+| Argo CD | Entrega continua |
+| Kubernetes | Entorno productivo local |
+| Hook `PostSync` | Validación posterior al despliegue |
 
-## Paso 2. Revisar la API
+# 2. Requisitos
 
-| Endpoint | Resultado |
-| --- | --- |
-| `GET /` | Nombre y rutas disponibles |
-| `GET /health` | Estado, entorno y versión |
-| `GET /api/stages` | Etapas del pipeline |
-| `GET /api/progress?completed=3` | Porcentaje de avance |
-
-# Parte 2 — Comprobar la aplicación localmente
-
-## Paso 3. Levantar con Docker Compose
+## Paso 1. Comprobar Docker Desktop
 
 ```bash
-docker compose up --build --wait
+docker version
+docker compose version
 ```
 
-Comprueba:
+Los dos comandos deben responder correctamente.
+
+## Paso 2. Comprobar Git
 
 ```bash
-docker compose ps
-curl http://localhost:8000/health
-curl http://localhost:8000/api/stages
-curl "http://localhost:8000/api/progress?completed=3"
+git --version
 ```
 
-Resultado esperado para `/health`:
+## Paso 3. Comprobar Bash
 
-```json
-{
-  "environment": "local",
-  "status": "ok",
-  "version": "development"
-}
-```
-
-Detén el entorno:
+En macOS o Linux:
 
 ```bash
-docker compose down
+bash --version
 ```
 
-## Paso 4. Ejecutar los controles locales
+En Windows, ejecuta la práctica desde Git Bash o WSL.
 
-En Linux o macOS:
+## Paso 4. Comprobar Kubernetes
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-dev.txt
+kubectl version --client
+kubectl config get-contexts
 ```
 
-Ejecuta:
+Si `docker-desktop` todavía no existe, créalo en la siguiente sección.
 
-```bash
-ruff check .
-ruff format --check .
-bandit --recursive app
-pytest -v tests/unit
-```
+# 3. Crear el cluster local
 
-Resultados esperados:
-
-```text
-Ruff: sin errores
-Bandit: sin hallazgos
-Pytest: 8 passed
-```
-
-# Parte 3 — Crear el cluster de Docker Desktop
-
-## Paso 5. Crear el cluster
+## Paso 5. Habilitar Kubernetes
 
 En Docker Desktop 4.51 o posterior:
 
-1. Abre **Kubernetes**.
-2. Selecciona **Create cluster**.
-3. Selecciona el provisioner `kind`.
-4. Usa un nodo para esta práctica.
-5. Selecciona **Create**.
-6. Espera hasta que el estado sea verde.
+1. Abre Docker Desktop.
+2. Selecciona **Kubernetes**.
+3. Selecciona **Create cluster**.
+4. Elige `kind`.
+5. Usa un nodo.
+6. Selecciona **Create**.
+7. Espera el indicador verde.
 
 ## Paso 6. Seleccionar el contexto
 
 ```bash
-kubectl config get-contexts
 kubectl config use-context docker-desktop
 kubectl cluster-info
 kubectl get nodes
@@ -203,16 +140,16 @@ kubectl get nodes
 
 Resultado esperado:
 
-- contexto actual: `docker-desktop`;
-- al menos un nodo;
-- nodo con estado `Ready`.
+```text
+desktop-control-plane   Ready
+```
 
-## Paso 7. Validar permisos
+## Paso 7. Comprobar permisos
 
 ```bash
 kubectl auth can-i create namespaces
 kubectl auth can-i create deployments --namespace default
-kubectl auth can-i create services --namespace default
+kubectl auth can-i create customresourcedefinitions
 ```
 
 Los tres comandos deben responder:
@@ -221,181 +158,411 @@ Los tres comandos deben responder:
 yes
 ```
 
-## Paso 8. Comprobar que no hay exposición
+# 4. Crear el fork
 
-```bash
-kubectl get services --all-namespaces
-```
+Cada estudiante trabaja en su propio fork. Eso permite que cada persona tenga:
 
-Los servicios internos del sistema pueden aparecer, pero esta práctica no
-necesita ningún Ingress, NodePort o LoadBalancer.
+- su propio GitHub Actions;
+- su propio package en GHCR;
+- su propia rama `gitops`;
+- su propio cluster Argo CD.
 
-# Parte 4 — Crear el repositorio de GitHub
-
-## Paso 9. Crear un repositorio vacío
+## Paso 8. Crear el fork
 
 En GitHub:
 
-1. Selecciona **New repository**.
-2. Asigna un nombre, por ejemplo `formatec-flask-k8s`.
-3. Preferentemente usa un repositorio privado.
-4. No agregues README, licencia ni `.gitignore`.
-5. Selecciona **Create repository**.
+1. Abre el repositorio entregado por el docente.
+2. Selecciona **Fork**.
+3. Usa tu cuenta como propietario.
+4. Conserva el nombre del repositorio.
+5. Selecciona **Create fork**.
 
-Un runner self-hosted no debe ejecutar código de colaboradores desconocidos.
-Para una clase, limita el repositorio a participantes confiables.
+El fork debe ser público para que Argo CD pueda leerlo sin credenciales.
 
-## Paso 10. Asociar el repositorio
+## Paso 9. Habilitar Actions
+
+Dentro del fork:
+
+1. Abre **Actions**.
+2. Selecciona **I understand my workflows, go ahead and enable them**.
+
+## Paso 10. Clonar el fork
+
+Reemplaza `TU_USUARIO`:
 
 ```bash
-git remote add origin https://github.com/USUARIO/formatec-flask-k8s.git
-git branch -M main
-git push -u origin main
+git clone https://github.com/TU_USUARIO/practica-clase6-cicd.git
+cd practica-clase6-cicd
 ```
 
-La primera ejecución utilizará runners hospedados por GitHub. Producción se
-omite porque todavía no existe `PROD_DEPLOY_ENABLED=true`.
+Comprueba:
 
-# Parte 5 — Instalar el runner self-hosted
+```bash
+git remote -v
+git branch --show-current
+```
 
-## Paso 11. Abrir la configuración
+El remote `origin` debe apuntar a tu fork y la rama debe ser `main`.
 
-En el repositorio:
+# 5. Configurar permisos de GitHub Actions
+
+El workflow necesita escribir únicamente en:
+
+- GHCR, para publicar la imagen;
+- la rama `gitops`, para registrar la promoción.
+
+## Paso 11. Permitir escritura
+
+En el fork:
 
 1. Abre **Settings**.
-2. Selecciona **Actions → Runners**.
-3. Selecciona **New self-hosted runner**.
-4. Selecciona macOS, Windows o Linux según tu equipo.
-5. Selecciona la arquitectura correcta.
+2. Selecciona **Actions → General**.
+3. Baja hasta **Workflow permissions**.
+4. Selecciona **Read and write permissions**.
+5. Guarda.
 
-GitHub mostrará comandos específicos y un token de registro temporal.
+No debes crear tokens personales ni secrets para este laboratorio.
 
-## Paso 12. Descargar el runner
+## Paso 12. Crear el entorno production
 
-Crea una carpeta fuera del repositorio:
+En el fork:
+
+1. Abre **Settings → Environments**.
+2. Selecciona **New environment**.
+3. Escribe `production`.
+4. Guarda.
+
+Para una promoción automática no agregues reviewers.
+
+Para practicar aprobación manual:
+
+1. Agrega tu usuario como **Required reviewer**.
+2. No actives **Prevent self-review** si trabajas solo.
+
+# 6. Instalar Argo CD automáticamente
+
+El script:
+
+1. verifica Docker, Git y Kubernetes;
+2. selecciona `docker-desktop`;
+3. crea la rama remota `gitops`;
+4. instala Argo CD `v3.4.5`;
+5. espera todos los componentes;
+6. registra el fork como repositorio observado;
+7. crea la Application `formatec-production`.
+
+## Paso 13. Ejecutar el bootstrap
+
+Desde la raíz del repositorio:
 
 ```bash
-mkdir -p "$HOME/actions-runner-formatec"
-cd "$HOME/actions-runner-formatec"
+./scripts/bootstrap-argocd.sh
 ```
 
-Ejecuta los comandos de descarga que GitHub muestra en pantalla.
+La primera instalación puede tardar varios minutos.
 
-No copies comandos de otro repositorio: el token es temporal y está asociado
-al repositorio actual.
-
-## Paso 13. Registrar la etiqueta `local-k8s`
-
-GitHub mostrará un comando similar a:
+## Paso 14. Comprobar Argo CD
 
 ```bash
-./config.sh --url https://github.com/USUARIO/REPOSITORIO --token TOKEN
+kubectl get pods --namespace argocd
+kubectl get applications --namespace argocd
 ```
 
-Agrega la etiqueta:
+Los pods de Argo CD deben quedar `Running`.
+
+La aplicación puede aparecer inicialmente como `OutOfSync` o `Degraded`. Es
+correcto: todavía no existe una imagen publicada por tu fork.
+
+## Paso 15. Confirmar la rama GitOps
 
 ```bash
-./config.sh \
-  --url https://github.com/USUARIO/REPOSITORIO \
-  --token TOKEN \
-  --labels local-k8s
+git ls-remote --heads origin gitops
 ```
 
-Cuando pregunte por el nombre, puedes usar:
+Debe mostrar una referencia:
 
 ```text
-docker-desktop-k8s
+refs/heads/gitops
 ```
 
-Cuando pregunte por el work folder, acepta `_work`.
+# 7. Ejecutar CI por primera vez
 
-## Paso 14. Iniciar el runner
+## Paso 16. Iniciar manualmente el workflow
 
-```bash
-./run.sh
-```
+En GitHub:
 
-La terminal debe mostrar:
+1. Abre **Actions**.
+2. Selecciona **CI/CD**.
+3. Selecciona **Run workflow**.
+4. Elige `main`.
+5. Confirma.
+
+## Paso 17. Observar análisis y unit tests
+
+Abre el job:
 
 ```text
-Listening for Jobs
+1 · Análisis estático y unit tests
 ```
 
-En GitHub, dentro de **Settings → Actions → Runners**, el runner debe aparecer:
+Debe ejecutar:
 
 ```text
-Idle
+Ruff
+Bandit
+8 unit tests
 ```
 
-Para la primera práctica, déjalo ejecutándose en esa terminal.
-
-## Paso 15. Validar herramientas desde el mismo usuario
-
-Abre otra terminal con el mismo usuario que ejecuta `run.sh`:
-
-```bash
-kubectl config current-context
-kubectl get nodes
-python3 --version
-curl --version
-```
-
-El contexto debe ser:
-
-```text
-docker-desktop
-```
-
-El runner usa el kubeconfig de ese usuario. Si ejecutas el runner con otro
-usuario o como servicio, ese usuario también debe tener acceso al contexto.
-
-# Parte 6 — Configurar GitHub
-
-## Paso 16. Crear el entorno development
-
-En **Settings → Environments**:
-
-1. Crea `development`.
-2. No agregues aprobación manual.
-3. No agregues secrets.
-
-El entorno dev se crea y destruye automáticamente por PR.
-
-## Paso 17. Crear el entorno production
-
-En **Settings → Environments**:
-
-1. Crea `production`.
-2. Agrega un **Required reviewer**.
-3. Si trabajan varias personas, activa **Prevent self-review**.
-4. Restringe el despliegue a la rama `main`.
-
-No necesitas secrets SSH, IPs, dominios ni credenciales manuales de GHCR. El
-workflow utiliza el `GITHUB_TOKEN` temporal del propio job.
-
-## Paso 18. Habilitar producción
+## Paso 18. Observar Docker Compose
 
 Abre:
 
 ```text
-Settings → Secrets and variables → Actions → Variables
+2 · Docker Compose y regresión
 ```
 
-Crea:
+El job:
 
-| Nombre | Valor |
-| --- | --- |
-| `PROD_DEPLOY_ENABLED` | `true` |
+1. construye la imagen;
+2. inicia Gunicorn con Docker Compose;
+3. espera `/health`;
+4. ejecuta cuatro tests HTTP;
+5. elimina el entorno.
 
-# Parte 7 — Ejecutar un PR completo
+Resultado esperado:
 
-## Paso 19. Crear una rama
+```text
+4 passed
+```
+
+## Paso 19. Observar la publicación
+
+Abre:
+
+```text
+3 · Publicar imagen
+```
+
+Se publican dos tags:
+
+```text
+ghcr.io/TU_USUARIO/practica-clase6-cicd:sha-<commit>
+ghcr.io/TU_USUARIO/practica-clase6-cicd:latest
+```
+
+# 8. Hacer pública la imagen
+
+GHCR crea el primer package como privado. Argo CD no tiene credenciales
+personales, por lo que la imagen debe ser pública.
+
+Este paso se realiza una sola vez por fork.
+
+## Paso 20. Cambiar la visibilidad
+
+Después de terminar el job de publicación:
+
+1. Abre tu perfil de GitHub.
+2. Selecciona **Packages**.
+3. Abre `practica-clase6-cicd`.
+4. Selecciona **Package settings**.
+5. Baja hasta **Danger Zone**.
+6. Selecciona **Change visibility**.
+7. Selecciona **Public**.
+8. Confirma escribiendo el nombre solicitado.
+
+> GitHub advierte que un package público no puede volver a ser privado. Usa
+> este repositorio exclusivamente para la práctica.
+
+Comprueba sin autenticación:
 
 ```bash
+docker pull ghcr.io/TU_USUARIO/practica-clase6-cicd:latest
+```
+
+# 9. Promover a producción
+
+## Paso 21. Aprobar si configuraste reviewer
+
+Si el job:
+
+```text
+4 · Promover estado GitOps
+```
+
+está esperando:
+
+1. abre la ejecución;
+2. selecciona **Review deployments**;
+3. marca `production`;
+4. selecciona **Approve and deploy**.
+
+Si no configuraste reviewer, el job continúa automáticamente.
+
+## Paso 22. Revisar el commit GitOps
+
+El job modifica en la rama `gitops`:
+
+```yaml
+images:
+  - name: formatec-api
+    newName: ghcr.io/TU_USUARIO/practica-clase6-cicd
+    newTag: sha-<commit>
+```
+
+Comprueba:
+
+```bash
+git fetch origin gitops
+git show origin/gitops:gitops/production/kustomization.yaml
+```
+
+No cambies tu rama local a `gitops`.
+
+# 10. Esperar la entrega continua
+
+Argo CD consulta GitHub periódicamente. Sin webhook, la detección puede tardar
+hasta aproximadamente tres minutos.
+
+## Paso 23. Observar la Application
+
+```bash
+kubectl get application formatec-production \
+  --namespace argocd \
+  --watch
+```
+
+El estado esperado es:
+
+```text
+SYNC STATUS   HEALTH STATUS
+Synced        Healthy
+```
+
+Usa `Ctrl+C` para salir.
+
+## Paso 24. Ejecutar la verificación automatizada
+
+```bash
+./scripts/verify-gitops.sh
+```
+
+El script verifica:
+
+- Application `Synced`;
+- Application `Healthy`;
+- Deployment disponible;
+- Service `ClusterIP`;
+- ausencia de Ingress;
+- `/health`;
+- `environment: production`.
+
+Resultado final esperado:
+
+```text
+Validación GitOps completada.
+```
+
+## Paso 25. Revisar Kubernetes
+
+```bash
+kubectl get all --namespace production
+```
+
+Debes encontrar:
+
+- un Deployment;
+- dos Pods;
+- un Service `ClusterIP`;
+- ningún Ingress;
+- ningún puerto público.
+
+Comprueba la imagen:
+
+```bash
+kubectl get deployment formatec-api \
+  --namespace production \
+  --output=jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+```
+
+Debe coincidir con el tag SHA publicado por GitHub Actions.
+
+# 11. Ver la API sin exponerla
+
+## Paso 26. Abrir un túnel local
+
+```bash
+kubectl port-forward \
+  --namespace production \
+  --address 127.0.0.1 \
+  service/formatec-api 8080:80
+```
+
+## Paso 27. Probar la API
+
+En otra terminal:
+
+```bash
+curl http://127.0.0.1:8080/health
+curl http://127.0.0.1:8080/api/stages
+curl "http://127.0.0.1:8080/api/progress?completed=3"
+```
+
+`/health` debe devolver:
+
+```json
+{
+  "environment": "production",
+  "status": "ok",
+  "version": "sha-<commit>"
+}
+```
+
+Detén el túnel con `Ctrl+C`.
+
+Sin el túnel:
+
+```bash
+curl http://127.0.0.1:8080/health
+```
+
+La conexión debe fallar. La API continúa funcionando dentro del cluster, pero
+no está expuesta.
+
+# 12. Comprobar el PostSync
+
+Argo CD ejecuta un Job después de que Deployment y Service están saludables.
+
+El Job consulta dentro del cluster:
+
+```text
+http://formatec-api/health
+http://formatec-api/api/stages
+```
+
+## Paso 28. Revisar el historial de sincronización
+
+```bash
+kubectl describe application formatec-production --namespace argocd
+```
+
+Busca una operación `Succeeded`.
+
+El Job exitoso se elimina automáticamente. Si falla, permanece temporalmente
+para diagnóstico y la sincronización queda fallida.
+
+# 13. Práctica con pull request
+
+Ahora se prueba el control previo al merge.
+
+## Paso 29. Crear una rama
+
+```bash
+git switch main
+git pull
 git switch -c feature/romper-contrato
 ```
 
-## Paso 20. Introducir una regresión
+## Paso 30. Introducir una regresión
 
 En `app/__init__.py`, cambia:
 
@@ -409,22 +576,19 @@ por:
 "percent": calculate_progress(completed, len(STAGES)),
 ```
 
-## Paso 21. Confirmar que los tests rápidos no la detectan
+## Paso 31. Comprobar los controles rápidos
 
 ```bash
+source .venv/bin/activate 2>/dev/null || true
 ruff check .
 ruff format --check .
 bandit --recursive app
 pytest tests/unit
 ```
 
-Resultado esperado:
+Los controles deben pasar. La regresión todavía no fue ejecutada.
 
-- análisis estático verde;
-- seguridad verde;
-- unit tests verdes.
-
-## Paso 22. Subir la rama
+## Paso 32. Subir la rama
 
 ```bash
 git add app/__init__.py
@@ -432,97 +596,47 @@ git commit -m "feat: renombrar campo percentage"
 git push -u origin feature/romper-contrato
 ```
 
-## Paso 23. Abrir el PR
+## Paso 33. Abrir un PR dentro del fork
 
 En GitHub:
 
-1. Abre **Pull requests**.
-2. Crea un PR desde `feature/romper-contrato` hacia `main`.
-3. No lo marques como draft.
-4. Abre la pestaña **Checks**.
+1. abre **Pull requests** dentro de tu fork;
+2. crea un PR de `feature/romper-contrato` hacia `main`;
+3. abre **Checks**.
 
-## Paso 24. Observar la publicación
+No abras este PR hacia el repositorio del docente: la promoción productiva de
+cada estudiante ocurre en su propio fork.
 
-Los primeros jobs deben mostrar:
+## Paso 34. Interpretar el check rojo
+
+Resultado esperado:
 
 ```text
 1 · Análisis estático y unit tests   success
-2 · Construir imagen                 success
-3 · Publicar imagen                  success
+2 · Docker Compose y regresión       failure
+Listo para merge                     failure
 ```
 
-En **Packages**, aparecerán:
+La regresión observa:
 
 ```text
-sha-<commit>
-pr-<número>
+esperado: percentage
+recibido: percent
 ```
 
-## Paso 25. Observar el namespace dev
+Producción no cambia.
 
-Mientras el job `4 · Kubernetes dev y regresión` está ejecutándose, abre una
-terminal local:
+# 14. Corregir y volver a promover
 
-```bash
-kubectl get namespaces --watch
-```
+## Paso 35. Restaurar el contrato
 
-Debe aparecer:
-
-```text
-dev-pr-<número>
-```
-
-En otra terminal:
-
-```bash
-kubectl get all --namespace dev-pr-<número>
-```
-
-Debes ver:
-
-- un Deployment;
-- dos Pods;
-- un Service `ClusterIP`;
-- ningún Ingress;
-- ningún puerto público.
-
-## Paso 26. Observar la regresión fallida
-
-El runner abre temporalmente:
-
-```text
-127.0.0.1:18080 → Service formatec-api:80
-```
-
-La regresión espera `percentage`, pero la API responde `percent`.
-
-Resultado:
-
-```text
-4 · Kubernetes dev y regresión   failure
-Listo para merge                 failure
-```
-
-Después del fallo:
-
-```bash
-kubectl get namespace dev-pr-<número>
-```
-
-El namespace debe estar eliminado o en estado `Terminating`.
-
-# Parte 8 — Corregir y habilitar el merge
-
-## Paso 27. Restaurar el contrato
-
-Vuelve a usar:
+Vuelve a:
 
 ```python
 "percentage": calculate_progress(completed, len(STAGES)),
 ```
 
-## Paso 28. Subir la corrección
+## Paso 36. Subir la corrección
 
 ```bash
 git add app/__init__.py
@@ -530,347 +644,215 @@ git commit -m "fix: restaurar contrato de progress"
 git push
 ```
 
-El mismo PR vuelve a ejecutar el workflow.
+El mismo PR se actualiza.
 
-## Paso 29. Comprobar el resultado
-
-El resumen **Listo para merge** debe mostrar:
-
-| Control | Resultado |
-| --- | --- |
-| Análisis y unit tests | success |
-| Imagen Docker | success |
-| Publicación GHCR | success |
-| Kubernetes dev y regresión | success |
-
-El namespace dev se elimina aunque la prueba termine correctamente.
-
-# Parte 9 — Proteger main
-
-## Paso 30. Crear una regla
-
-En **Settings → Rules → Rulesets** o **Branches**:
-
-1. Aplica la regla a `main`.
-2. Exige pull request.
-3. Exige el check **Listo para merge**.
-4. Exige que la rama esté actualizada.
-5. Opcionalmente exige aprobación de código.
-6. Bloquea pushes directos.
-
-# Parte 10 — Desplegar production
-
-## Paso 31. Hacer merge
-
-Con el PR verde:
-
-1. Selecciona **Merge pull request**.
-2. Confirma.
-3. Abre **Actions**.
-4. Selecciona la ejecución de `main`.
-
-## Paso 32. Observar la espera
-
-Los jobs hospedados por GitHub ejecutan:
-
-```text
-análisis → build → publicación
-```
-
-El job:
-
-```text
-5 · Kubernetes production
-```
-
-queda esperando aprobación del entorno.
-
-Mientras espera:
-
-- el runner local todavía no recibió el job;
-- el cluster no cambió;
-- el job no accedió al cluster.
-
-## Paso 33. Aprobar
-
-En GitHub:
-
-1. Abre la ejecución.
-2. Selecciona **Review deployments**.
-3. Marca `production`.
-4. Selecciona **Approve and deploy**.
-
-## Paso 34. Observar el runner
-
-La terminal del runner debe mostrar que recibió:
-
-```text
-5 · Kubernetes production
-```
-
-El job:
-
-1. selecciona `docker-desktop`;
-2. crea el namespace `production`;
-3. configura el pull secret temporal;
-4. aplica el Deployment y el Service;
-5. espera el RollingUpdate;
-6. abre `127.0.0.1:18081`;
-7. ejecuta la regresión;
-8. cierra el túnel.
-
-## Paso 35. Comprobar Kubernetes
-
-```bash
-kubectl get all --namespace production
-kubectl get deployment formatec-api --namespace production
-kubectl get pods --namespace production
-kubectl get service formatec-api --namespace production
-```
+## Paso 37. Esperar el check verde
 
 Resultado esperado:
 
 ```text
-Deployment disponible
-2 Pods Ready
-Service tipo ClusterIP
+1 · Análisis estático y unit tests   success
+2 · Docker Compose y regresión       success
+Listo para merge                     success
 ```
 
-Comprueba que la imagen coincide con `main`:
+## Paso 38. Hacer merge
+
+1. Selecciona **Merge pull request**.
+2. Confirma.
+3. Observa la ejecución de `main`.
+4. Aprueba `production` si corresponde.
+5. Espera Argo CD.
+6. Ejecuta:
 
 ```bash
-kubectl get deployment formatec-api \
-  --namespace production \
-  --output=jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+./scripts/verify-gitops.sh
 ```
 
-## Paso 36. Consultar producción localmente
+El SHA de `/health` debe cambiar al nuevo commit.
 
-Abre manualmente un túnel local:
+# 15. Proteger main
+
+Después de que GitHub haya registrado **Listo para merge**:
+
+1. abre **Settings → Rules → Rulesets** o **Branches**;
+2. crea una regla para `main`;
+3. exige pull request;
+4. exige el check **Listo para merge**;
+5. exige que la rama esté actualizada;
+6. bloquea pushes directos.
+
+No protejas la rama `gitops` en esta práctica: GitHub Actions necesita
+actualizarla.
+
+# 16. Acceder a la interfaz de Argo CD
+
+No es necesario instalar el CLI.
+
+## Paso 39. Obtener la contraseña inicial
+
+```bash
+kubectl get secret argocd-initial-admin-secret \
+  --namespace argocd \
+  --output=jsonpath='{.data.password}' |
+base64 --decode
+echo
+```
+
+Usuario:
+
+```text
+admin
+```
+
+## Paso 40. Abrir la interfaz local
 
 ```bash
 kubectl port-forward \
-  --namespace production \
+  --namespace argocd \
   --address 127.0.0.1 \
-  service/formatec-api 8080:80
+  service/argocd-server 8080:443
 ```
 
-En otra terminal:
+Abre:
+
+```text
+https://127.0.0.1:8080
+```
+
+El certificado local genera una advertencia del navegador. Argo CD continúa
+sin exposición pública.
+
+# 17. Reiniciar el laboratorio
+
+## Eliminar únicamente la aplicación
 
 ```bash
-curl http://127.0.0.1:8080/health
-curl http://127.0.0.1:8080/api/stages
+kubectl delete application formatec-production --namespace argocd
+kubectl delete namespace production --ignore-not-found
 ```
 
-`/health` debe mostrar:
-
-```json
-{
-  "environment": "production",
-  "status": "ok",
-  "version": "<SHA de main>"
-}
-```
-
-Detén el túnel con `Ctrl+C`.
-
-# Parte 11 — Validar que no existe exposición
-
-## Paso 37. Revisar el Service
+Volver a registrar:
 
 ```bash
-kubectl get service formatec-api \
-  --namespace production \
-  --output=yaml
+./scripts/bootstrap-argocd.sh
 ```
 
-Busca:
-
-```yaml
-type: ClusterIP
-```
-
-No deben existir:
-
-```yaml
-type: NodePort
-type: LoadBalancer
-```
-
-## Paso 38. Buscar recursos expuestos
+## Eliminar Argo CD completamente
 
 ```bash
-kubectl get ingress --all-namespaces
-kubectl get services --all-namespaces
+kubectl delete namespace argocd
+kubectl delete namespace production --ignore-not-found
 ```
 
-La aplicación no debe aparecer como Ingress, NodePort o LoadBalancer.
+La rama `gitops`, el fork y las imágenes de GHCR no se eliminan.
 
-## Paso 39. Comprobar conexiones
+# 18. Problemas frecuentes
 
-Cuando no hay un `kubectl port-forward` activo:
+## `bootstrap-argocd.sh` dice que el repositorio debe ser público
+
+Comprueba que:
+
+- `origin` apunta a tu fork;
+- el fork es público;
+- puedes abrirlo sin iniciar sesión.
 
 ```bash
-curl http://127.0.0.1:8080/health
+git remote -v
+git ls-remote origin HEAD
 ```
 
-La conexión debe fallar. Kubernetes continúa ejecutando la API, pero no existe
-un camino desde el host hasta el Service.
-
-# Parte 12 — Actualización y rollback
-
-## Paso 40. Revisar el historial
+## La rama `gitops` no existe
 
 ```bash
-kubectl rollout history deployment/formatec-api \
-  --namespace production
+git push origin main:gitops
 ```
 
-## Paso 41. Observar una nueva promoción
+Después vuelve a ejecutar el bootstrap.
 
-En un nuevo PR:
+## El job de promoción no puede hacer push
 
-1. modifica la API;
-2. actualiza los tests;
-3. espera dev y regresión;
-4. haz merge;
-5. aprueba production.
+Configura:
 
-Kubernetes crea una revisión nueva y reemplaza los pods gradualmente.
-
-## Paso 42. Rollback manual
-
-```bash
-kubectl rollout undo deployment/formatec-api \
-  --namespace production
-
-kubectl rollout status deployment/formatec-api \
-  --namespace production
+```text
+Settings
+→ Actions
+→ General
+→ Workflow permissions
+→ Read and write permissions
 ```
 
-El workflow hace este rollback automáticamente si la regresión post-deploy
-falla.
+No protejas `gitops`.
 
-# Seguridad del runner self-hosted
-
-El workflow contiene dos controles importantes:
-
-1. El job dev solo acepta PRs cuya rama pertenece al mismo repositorio.
-2. Producción solo acepta `main` y requiere el entorno protegido.
-
-Los PR desde forks externos no pueden publicar ni ejecutar el runner local.
-
-Aun así:
-
-- usa únicamente colaboradores confiables;
-- revisa cambios en `.github/workflows/` y `k8s/`;
-- no guardes credenciales personales en la máquina del runner;
-- usa un cluster dedicado al laboratorio;
-- detén el runner cuando no se utiliza;
-- no uses este runner para repositorios públicos con contribuciones abiertas.
-
-# Problemas frecuentes
-
-## El job queda en “Queued”
+## Argo CD muestra `ImagePullBackOff`
 
 Comprueba:
 
-1. que `./run.sh` esté ejecutándose;
-2. que GitHub muestre el runner como `Idle`;
-3. que tenga la etiqueta `local-k8s`;
-4. que el equipo tenga salida HTTPS.
-
-## `docker-desktop` no existe
+1. que el workflow publicó la imagen;
+2. que el package es público;
+3. que el tag SHA existe;
+4. que Docker Desktop tiene salida a `ghcr.io`.
 
 ```bash
-kubectl config get-contexts
+kubectl describe pods --namespace production
 ```
 
-Si no aparece:
+## Argo CD todavía no detecta el commit
 
-1. abre Docker Desktop;
-2. crea o inicia el cluster Kubernetes;
-3. espera el estado verde.
-
-## El runner no accede a Kubernetes
-
-Ejecuta con el mismo usuario del runner:
-
-```bash
-kubectl config current-context
-kubectl get nodes
-```
-
-Si el runner se instaló como servicio, comprueba qué usuario ejecuta el
-servicio y dónde busca su kubeconfig.
-
-## `ImagePullBackOff`
-
-```bash
-kubectl describe pod \
-  --namespace production \
-  --selector app=formatec-api
-```
+Sin webhook puede tardar unos minutos.
 
 Comprueba:
 
-- que el job `3 · Publicar imagen` pasó;
-- que la imagen `sha-<commit>` existe;
-- que el package está vinculado al repositorio;
-- que `GITHUB_TOKEN` tiene permiso `packages: read`;
-- que Docker Desktop tiene salida a `ghcr.io`.
+```bash
+git fetch origin gitops
+git log --oneline origin/gitops -3
+kubectl get application formatec-production --namespace argocd
+```
 
-## El namespace dev permanece
+## El hook PostSync falla
 
 ```bash
-kubectl delete namespace dev-pr-NUMERO
+kubectl get jobs,pods --namespace production
+kubectl logs job/formatec-api-smoke --namespace production
 ```
 
-Después revisa el step **Destruir el namespace efímero**.
+## El puerto 8000 está ocupado durante Compose
 
-## El puerto local está ocupado
-
-Busca un `kubectl port-forward` anterior y detenlo. El workflow utiliza:
-
-```text
-18080 para dev
-18081 para production
+```bash
+APP_PORT=8081 docker compose up --build --wait
+BASE_URL=http://127.0.0.1:8081 pytest -m regression tests/regression
+APP_PORT=8081 docker compose down
 ```
 
-## Producción aparece omitida
+# 19. Criterios de finalización
 
-Comprueba la variable de repositorio:
+- [ ] Fork público creado.
+- [ ] Actions habilitado.
+- [ ] Workflow con permisos de escritura.
+- [ ] Cluster `docker-desktop` Ready.
+- [ ] Argo CD instalado mediante el script.
+- [ ] Rama remota `gitops` creada.
+- [ ] Análisis estático aprobado.
+- [ ] Ocho unit tests aprobados.
+- [ ] Cuatro tests de regresión aprobados.
+- [ ] Imagen SHA publicada en GHCR.
+- [ ] Package público.
+- [ ] Commit de promoción en `gitops`.
+- [ ] Application `Synced`.
+- [ ] Application `Healthy`.
+- [ ] Dos pods de producción Ready.
+- [ ] Service `ClusterIP`.
+- [ ] Smoke test PostSync aprobado.
+- [ ] API accesible únicamente mediante port-forward local.
+- [ ] PR rojo observado.
+- [ ] PR corregido y verde.
+- [ ] Nueva versión promovida después del merge.
 
-```text
-PROD_DEPLOY_ENABLED=true
-```
+# 20. Referencias
 
-## Producción queda esperando
-
-Es el comportamiento esperado. Selecciona **Review deployments** y aprueba el
-entorno `production`.
-
-# Criterios de finalización
-
-- [ ] Docker Desktop Kubernetes está activo.
-- [ ] El contexto es `docker-desktop`.
-- [ ] El runner `local-k8s` aparece online.
-- [ ] Ruff, Bandit y unit tests pasan.
-- [ ] El PR publica una imagen `pr-<número>`.
-- [ ] Aparece un namespace dev efímero.
-- [ ] La regresión bloquea un contrato incompatible.
-- [ ] El namespace dev se elimina.
-- [ ] **Listo para merge** queda verde después de corregir.
-- [ ] Production espera aprobación.
-- [ ] Production despliega dos pods.
-- [ ] La imagen desplegada coincide con el SHA de `main`.
-- [ ] El Service es `ClusterIP`.
-- [ ] No existe Ingress, NodePort ni LoadBalancer.
-- [ ] `/health` solo responde mientras existe un port-forward local.
-
-# Referencias
-
+- [Argo CD](https://argo-cd.readthedocs.io/en/stable/)
+- [Sincronización automática](https://argo-cd.readthedocs.io/en/stable/user-guide/auto_sync/)
+- [Automatización desde CI](https://argo-cd.readthedocs.io/en/stable/user-guide/ci_automation/)
+- [Sync hooks](https://argo-cd.readthedocs.io/en/stable/user-guide/sync-waves/)
 - [Kubernetes en Docker Desktop](https://docs.docker.com/desktop/use-desktop/kubernetes/)
-- [Runners self-hosted](https://docs.github.com/en/actions/reference/runners/self-hosted-runners)
-- [Seguridad de GitHub Actions](https://docs.github.com/en/actions/reference/security/secure-use)
-- [Secrets para registries privados](https://kubernetes.io/docs/reference/kubectl/generated/kubectl_create_secret_docker-registry/)
+- [GitHub Container Registry](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
