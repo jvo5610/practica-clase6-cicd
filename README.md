@@ -572,11 +572,11 @@ por:
 ## Paso 31. Comprobar los controles rápidos
 
 ```console
-source .venv/bin/activate 2>/dev/null || true
-ruff check .
-ruff format --check .
-bandit --recursive app
-pytest tests/unit
+python3 -m pip install --user --requirement requirements-dev.txt
+python3 -m ruff check .
+python3 -m ruff format --check .
+python3 -m bandit --recursive app
+python3 -m pytest tests/unit
 ```
 
 Los controles deben pasar. La regresión todavía no fue ejecutada.
