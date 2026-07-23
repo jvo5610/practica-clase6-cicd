@@ -11,4 +11,4 @@ labels:
   - pairs:
       app.kubernetes.io/version: bootstrap
     includeSelectors: false
-
+    includeTemplates: true

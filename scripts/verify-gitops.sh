@@ -30,10 +30,21 @@ for attempt in $(seq 1 60); do
       --namespace "$ARGOCD_NAMESPACE" \
       --output=jsonpath='{.status.health.status}' 2>/dev/null || true
   )"
+  operation_phase="$(
+    kubectl get application "$APPLICATION" \
+      --namespace "$ARGOCD_NAMESPACE" \
+      --output=jsonpath='{.status.operationState.phase}' 2>/dev/null || true
+  )"
 
-  echo "Intento $attempt/60: sync=${sync_status:-pendiente} health=${health_status:-pendiente}"
+  echo \
+    "Intento $attempt/60:" \
+    "sync=${sync_status:-pendiente}" \
+    "health=${health_status:-pendiente}" \
+    "hook=${operation_phase:-pendiente}"
 
-  if [ "$sync_status" = "Synced" ] && [ "$health_status" = "Healthy" ]; then
+  if [ "$sync_status" = "Synced" ] &&
+    [ "$health_status" = "Healthy" ] &&
+    [ "$operation_phase" = "Succeeded" ]; then
     break
   fi
 
@@ -80,13 +91,12 @@ for attempt in $(seq 1 15); do
   echo "Health check local $attempt/15"
   if response="$(curl --fail --silent "http://127.0.0.1:$LOCAL_PORT/health")"; then
     echo "$response"
-    case "$response" in
-      *'"status":"ok"'*'"environment":"production"'* | \
-        *'"environment":"production"'*'"status":"ok"'*)
-        echo "Validación GitOps completada."
-        exit 0
-        ;;
-    esac
+    if [[ "$response" == *'"status":"ok"'* ]] &&
+      [[ "$response" == *'"environment":"production"'* ]] &&
+      [[ "$response" == *'"version":"sha-'* ]]; then
+      echo "Validación GitOps completada, incluido el hook PostSync."
+      exit 0
+    fi
   fi
   sleep 2
 done
