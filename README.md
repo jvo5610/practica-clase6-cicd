@@ -4,7 +4,7 @@ Esta práctica parte de:
 
 - una cuenta de GitHub;
 - Docker Desktop con un cluster Kubernetes local;
-- Git y una terminal Bash.
+- Git y Python 3.12 o posterior.
 
 Al finalizar tendrás:
 
@@ -59,8 +59,10 @@ router.
 │   ├── service.yaml
 │   └── smoke-test.yaml
 ├── scripts/
-│   ├── bootstrap-argocd.sh
-│   └── verify-gitops.sh
+│   ├── bootstrap_argocd.py
+│   ├── ci_helpers.py
+│   ├── show_argocd_password.py
+│   └── verify_gitops.py
 ├── tests/
 │   ├── regression/test_api_contract.py
 │   └── unit/test_app.py
@@ -87,7 +89,7 @@ router.
 
 ## Paso 1. Comprobar Docker Desktop
 
-```bash
+```console
 docker version
 docker compose version
 ```
@@ -96,23 +98,23 @@ Los dos comandos deben responder correctamente.
 
 ## Paso 2. Comprobar Git
 
-```bash
+```console
 git --version
 ```
 
-## Paso 3. Comprobar Bash
+## Paso 3. Comprobar Python
 
-En macOS o Linux:
-
-```bash
-bash --version
+```console
+python3 --version
 ```
 
-En Windows, ejecuta la práctica desde Git Bash o WSL.
+Debe responder Python 3.12 o posterior. En Windows usa el launcher `py` y
+reemplaza `python3` por `py` en los comandos del instructivo. No necesitas Git
+Bash ni WSL.
 
 ## Paso 4. Comprobar Kubernetes
 
-```bash
+```console
 kubectl version --client
 kubectl config get-contexts
 ```
@@ -135,7 +137,7 @@ En Docker Desktop 4.51 o posterior:
 
 ## Paso 6. Seleccionar el contexto
 
-```bash
+```console
 kubectl config use-context docker-desktop
 kubectl cluster-info
 kubectl get nodes
@@ -149,7 +151,7 @@ desktop-control-plane   Ready
 
 ## Paso 7. Comprobar permisos
 
-```bash
+```console
 kubectl auth can-i create namespaces
 kubectl auth can-i create deployments --namespace default
 kubectl auth can-i create customresourcedefinitions
@@ -193,14 +195,14 @@ Dentro del fork:
 
 Reemplaza `TU_USUARIO`:
 
-```bash
+```console
 git clone https://github.com/TU_USUARIO/practica-clase6-cicd.git
 cd practica-clase6-cicd
 ```
 
 Comprueba:
 
-```bash
+```console
 git remote -v
 git branch --show-current
 ```
@@ -332,7 +334,7 @@ Después de terminar el job de publicación:
 
 Comprueba sin autenticación:
 
-```bash
+```console
 docker pull ghcr.io/TU_USUARIO/practica-clase6-cicd:latest
 ```
 
@@ -369,7 +371,7 @@ images:
 
 Comprueba:
 
-```bash
+```console
 git fetch origin gitops
 git show origin/gitops:gitops/production/kustomization.yaml
 ```
@@ -396,8 +398,8 @@ El script:
 
 Desde la raíz del repositorio:
 
-```bash
-./scripts/bootstrap-argocd.sh
+```console
+python3 scripts/bootstrap_argocd.py
 ```
 
 La primera instalación puede tardar varios minutos. Si la promoción aún no
@@ -405,7 +407,7 @@ terminó, el script se detiene antes de crear la Application y explica qué falt
 
 ## Paso 21. Comprobar Argo CD
 
-```bash
+```console
 kubectl get pods --namespace argocd
 kubectl get applications --namespace argocd
 ```
@@ -414,7 +416,7 @@ Los pods de Argo CD deben quedar `Running`.
 
 ## Paso 22. Confirmar la rama GitOps
 
-```bash
+```console
 git ls-remote --heads origin gitops
 ```
 
@@ -431,10 +433,8 @@ hasta aproximadamente tres minutos.
 
 ## Paso 23. Observar la Application
 
-```bash
-kubectl get application formatec-production \
-  --namespace argocd \
-  --watch
+```console
+kubectl get application formatec-production --namespace argocd --watch
 ```
 
 El estado esperado es:
@@ -448,8 +448,8 @@ Usa `Ctrl+C` para salir.
 
 ## Paso 24. Ejecutar la verificación automatizada
 
-```bash
-./scripts/verify-gitops.sh
+```console
+python3 scripts/verify_gitops.py
 ```
 
 El script verifica:
@@ -470,7 +470,7 @@ Validación GitOps completada.
 
 ## Paso 25. Revisar Kubernetes
 
-```bash
+```console
 kubectl get all --namespace production
 ```
 
@@ -484,10 +484,8 @@ Debes encontrar:
 
 Comprueba la imagen:
 
-```bash
-kubectl get deployment formatec-api \
-  --namespace production \
-  --output=jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+```console
+kubectl get deployment formatec-api --namespace production --output=jsonpath={.spec.template.spec.containers[0].image}
 ```
 
 Debe coincidir con el tag SHA publicado por GitHub Actions.
@@ -496,22 +494,17 @@ Debe coincidir con el tag SHA publicado por GitHub Actions.
 
 ## Paso 26. Abrir un túnel local
 
-```bash
-kubectl port-forward \
-  --namespace production \
-  --address 127.0.0.1 \
-  service/formatec-api 8080:80
+```console
+kubectl port-forward --namespace production --address 127.0.0.1 service/formatec-api 8080:80
 ```
 
 ## Paso 27. Probar la API
 
-En otra terminal:
+En otra terminal, abre estas direcciones en el navegador:
 
-```bash
-curl http://127.0.0.1:8080/health
-curl http://127.0.0.1:8080/api/stages
-curl "http://127.0.0.1:8080/api/progress?completed=3"
-```
+- `http://127.0.0.1:8080/health`
+- `http://127.0.0.1:8080/api/stages`
+- `http://127.0.0.1:8080/api/progress?completed=3`
 
 `/health` debe devolver:
 
@@ -525,14 +518,8 @@ curl "http://127.0.0.1:8080/api/progress?completed=3"
 
 Detén el túnel con `Ctrl+C`.
 
-Sin el túnel:
-
-```bash
-curl http://127.0.0.1:8080/health
-```
-
-La conexión debe fallar. La API continúa funcionando dentro del cluster, pero
-no está expuesta.
+Después de detener el túnel, actualiza la página. La conexión debe fallar. La
+API continúa funcionando dentro del cluster, pero no está expuesta.
 
 # 12. Comprobar el PostSync
 
@@ -547,7 +534,7 @@ http://formatec-api/api/stages
 
 ## Paso 28. Revisar el historial de sincronización
 
-```bash
+```console
 kubectl describe application formatec-production --namespace argocd
 ```
 
@@ -562,7 +549,7 @@ Ahora se prueba el control previo al merge.
 
 ## Paso 29. Crear una rama
 
-```bash
+```console
 git switch main
 git pull
 git switch -c feature/romper-contrato
@@ -584,7 +571,7 @@ por:
 
 ## Paso 31. Comprobar los controles rápidos
 
-```bash
+```console
 source .venv/bin/activate 2>/dev/null || true
 ruff check .
 ruff format --check .
@@ -596,7 +583,7 @@ Los controles deben pasar. La regresión todavía no fue ejecutada.
 
 ## Paso 32. Subir la rama
 
-```bash
+```console
 git add app/__init__.py
 git commit -m "feat: renombrar campo percentage"
 git push -u origin feature/romper-contrato
@@ -644,7 +631,7 @@ Vuelve a:
 
 ## Paso 36. Subir la corrección
 
-```bash
+```console
 git add app/__init__.py
 git commit -m "fix: restaurar contrato de progress"
 git push
@@ -671,8 +658,8 @@ Listo para merge                     success
 5. Espera Argo CD.
 6. Ejecuta:
 
-```bash
-./scripts/verify-gitops.sh
+```console
+python3 scripts/verify_gitops.py
 ```
 
 El SHA de `/health` debe cambiar al nuevo commit.
@@ -697,12 +684,8 @@ No es necesario instalar el CLI.
 
 ## Paso 39. Obtener la contraseña inicial
 
-```bash
-kubectl get secret argocd-initial-admin-secret \
-  --namespace argocd \
-  --output=jsonpath='{.data.password}' |
-base64 --decode
-echo
+```console
+python3 scripts/show_argocd_password.py
 ```
 
 Usuario:
@@ -713,11 +696,8 @@ admin
 
 ## Paso 40. Abrir la interfaz local
 
-```bash
-kubectl port-forward \
-  --namespace argocd \
-  --address 127.0.0.1 \
-  service/argocd-server 8080:443
+```console
+kubectl port-forward --namespace argocd --address 127.0.0.1 service/argocd-server 8080:443
 ```
 
 Abre:
@@ -733,20 +713,20 @@ sin exposición pública.
 
 ## Eliminar únicamente la aplicación
 
-```bash
+```console
 kubectl delete application formatec-production --namespace argocd
 kubectl delete namespace production --ignore-not-found
 ```
 
 Volver a registrar:
 
-```bash
-./scripts/bootstrap-argocd.sh
+```console
+python3 scripts/bootstrap_argocd.py
 ```
 
 ## Eliminar Argo CD completamente
 
-```bash
+```console
 kubectl delete namespace argocd
 kubectl delete namespace production --ignore-not-found
 ```
@@ -755,7 +735,7 @@ La rama `gitops`, el fork y las imágenes de GHCR no se eliminan.
 
 # 18. Problemas frecuentes
 
-## `bootstrap-argocd.sh` dice que el repositorio debe ser público
+## `bootstrap_argocd.py` dice que el repositorio debe ser público
 
 Comprueba que:
 
@@ -763,14 +743,14 @@ Comprueba que:
 - el fork es público;
 - puedes abrirlo sin iniciar sesión.
 
-```bash
+```console
 git remote -v
 git ls-remote origin HEAD
 ```
 
 ## La rama `gitops` no existe
 
-```bash
+```console
 git push origin main:gitops
 ```
 
@@ -799,7 +779,7 @@ Comprueba:
 3. que el tag SHA existe;
 4. que Docker Desktop tiene salida a `ghcr.io`.
 
-```bash
+```console
 kubectl describe pods --namespace production
 ```
 
@@ -809,7 +789,7 @@ Sin webhook puede tardar unos minutos.
 
 Comprueba:
 
-```bash
+```console
 git fetch origin gitops
 git log --oneline origin/gitops -3
 kubectl get application formatec-production --namespace argocd
@@ -817,14 +797,14 @@ kubectl get application formatec-production --namespace argocd
 
 ## El hook PostSync falla
 
-```bash
+```console
 kubectl get jobs,pods --namespace production
 kubectl logs job/formatec-api-smoke --namespace production
 ```
 
 ## El puerto 8000 está ocupado durante Compose
 
-```bash
+```console
 APP_PORT=8081 docker compose up --build --wait
 BASE_URL=http://127.0.0.1:8081 pytest -m regression tests/regression
 APP_PORT=8081 docker compose down
