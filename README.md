@@ -354,7 +354,8 @@ Si no configuraste reviewer, el job continúa automáticamente.
 
 ## Paso 19. Revisar el commit GitOps
 
-El job modifica en la rama `gitops`:
+El job copia desde el commit aprobado los manifests de `k8s/` y
+`gitops/production/`. Después fija en la rama `gitops` la imagen inmutable:
 
 ```yaml
 images:

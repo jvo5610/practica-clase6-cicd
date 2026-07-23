@@ -16,7 +16,18 @@ cleanup() {
 
 trap cleanup EXIT
 
+for command_name in curl cut git grep kubectl seq; do
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "Falta el comando requerido: $command_name" >&2
+    exit 1
+  fi
+done
+
 kubectl config use-context "$KUBE_CONTEXT" >/dev/null
+
+expected_revision="$(
+  git ls-remote --exit-code origin refs/heads/gitops | cut -f1
+)"
 
 echo "Esperando que Argo CD sincronice..."
 for attempt in $(seq 1 60); do
@@ -35,16 +46,23 @@ for attempt in $(seq 1 60); do
       --namespace "$ARGOCD_NAMESPACE" \
       --output=jsonpath='{.status.operationState.phase}' 2>/dev/null || true
   )"
+  deployed_revision="$(
+    kubectl get application "$APPLICATION" \
+      --namespace "$ARGOCD_NAMESPACE" \
+      --output=jsonpath='{.status.sync.revision}' 2>/dev/null || true
+  )"
 
   echo \
     "Intento $attempt/60:" \
     "sync=${sync_status:-pendiente}" \
     "health=${health_status:-pendiente}" \
-    "hook=${operation_phase:-pendiente}"
+    "hook=${operation_phase:-pendiente}" \
+    "revision=${deployed_revision:-pendiente}"
 
   if [ "$sync_status" = "Synced" ] &&
     [ "$health_status" = "Healthy" ] &&
-    [ "$operation_phase" = "Succeeded" ]; then
+    [ "$operation_phase" = "Succeeded" ] &&
+    [ "$deployed_revision" = "$expected_revision" ]; then
     break
   fi
 
