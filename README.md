@@ -1,261 +1,150 @@
-# Laboratorio paso a paso: CI/CD de una API Flask
+# Laboratorio: GitHub Actions y Kubernetes local sin exposición pública
 
-En esta práctica vas a recorrer un pipeline completo:
+Esta práctica implementa un flujo CI/CD completo para una API Flask:
 
 ```text
 Pull request
   → análisis estático
   → unit tests
-  → construcción de imagen
-  → despliegue dev efímero
+  → imagen en GHCR
+  → namespace dev efímero en Docker Desktop Kubernetes
   → regresión HTTP
   → listo para merge
-  → publicación en GHCR
   → aprobación
-  → producción
+  → namespace production local
+  → regresión post-deploy
 ```
 
-La aplicación es una API Flask pequeña. El objetivo no es aprender Flask en
-profundidad, sino observar cómo GitHub Actions controla el paso de un cambio
-desde una rama hasta producción.
+El cluster Kubernetes no recibe conexiones desde Internet:
 
-## Qué vas a comprobar
+- no se crea Ingress;
+- no se crea Service `LoadBalancer`;
+- no se crea Service `NodePort`;
+- la API usa únicamente Service `ClusterIP`;
+- los tests abren temporalmente un `port-forward` en `127.0.0.1`;
+- el túnel se cierra al terminar el job;
+- el router doméstico no necesita publicar puertos.
 
-Al finalizar vas a poder demostrar que:
+> “Sin exposición a Internet” significa que no existen conexiones entrantes
+> hacia el cluster. El equipo sí necesita conexiones salientes HTTPS hacia
+> GitHub y GHCR para recibir jobs y descargar imágenes.
 
-- un pull request no puede integrarse si falla un control;
-- el análisis estático ocurre antes del despliegue;
-- los unit tests revisan funciones y rutas sin levantar un servidor real;
-- Docker Compose levanta un entorno dev efímero;
-- los tests de regresión consumen la API desplegada mediante HTTP;
-- un check verde indica que el cambio está listo para merge;
-- `main` publica una imagen identificada por el SHA del commit;
-- producción puede exigir aprobación antes de usar sus secretos;
-- `/health` permite comprobar qué versión está desplegada.
+# Arquitectura del laboratorio
 
-# Parte 1 — Conocer el repositorio
+Se utilizan dos tipos de runner.
 
-## Paso 1. Revisar los archivos
+| Trabajo | Runner | Motivo |
+| --- | --- | --- |
+| Ruff, Bandit y unit tests | GitHub-hosted | Entorno limpio y descartable |
+| Construcción y publicación | GitHub-hosted | Puede publicar directamente en GHCR |
+| Kubernetes dev | Self-hosted local | Tiene acceso al contexto `docker-desktop` |
+| Kubernetes production | Self-hosted local | Tiene acceso al cluster local |
 
-Ubícate en la carpeta del repositorio:
+El runner self-hosted inicia una conexión saliente hacia GitHub. GitHub no
+inicia una conexión hacia tu notebook.
 
-```bash
-cd practica-clase6-cicd
-```
+# Flujo del pull request
 
-Identifica estos archivos:
+Cuando se abre o actualiza un PR hacia `main`:
+
+1. GitHub ejecuta Ruff.
+2. GitHub ejecuta Bandit.
+3. GitHub ejecuta los unit tests.
+4. GitHub construye la imagen.
+5. GitHub publica `sha-<commit>` y `pr-<número>` en GHCR.
+6. El runner local recibe el job.
+7. Crea el namespace `dev-pr-<número>`.
+8. Crea un pull secret temporal para GHCR.
+9. Despliega dos réplicas de la API.
+10. Espera el rollout.
+11. Abre un túnel solamente en `127.0.0.1:18080`.
+12. Ejecuta la regresión HTTP.
+13. Cierra el túnel.
+14. Elimina el namespace completo.
+15. El check **Listo para merge** informa el resultado.
+
+# Flujo de producción
+
+Después del merge a `main`:
+
+1. Se repiten análisis, unit tests y build.
+2. Se publica la imagen exacta `sha-<commit>`.
+3. El job referencia el entorno protegido `production`.
+4. GitHub solicita aprobación.
+5. El runner local despliega en el namespace `production`.
+6. Kubernetes realiza un RollingUpdate.
+7. Se ejecuta la regresión post-deploy.
+8. Si falla, el workflow ejecuta `kubectl rollout undo`.
+9. Si pasa, el deployment queda ejecutándose localmente.
+
+# Parte 1 — Revisar el repositorio
+
+## Paso 1. Identificar los archivos
 
 ```text
 .
-├── .github/workflows/cicd.yml       Pipeline de GitHub Actions
-├── app/__init__.py                  API Flask
-├── deploy/compose.prod.yaml         Despliegue de producción
+├── .github/
+│   ├── actionlint.yaml
+│   └── workflows/cicd.yml
+├── app/__init__.py
+├── k8s/app.yaml
 ├── tests/
 │   ├── regression/test_api_contract.py
 │   └── unit/test_app.py
-├── compose.yaml                     Entorno local y dev
-├── Dockerfile                       Imagen de la API
-├── pyproject.toml                   Configuración de Ruff y Pytest
-├── requirements-dev.txt             Herramientas de desarrollo
-└── requirements.txt                 Dependencias de ejecución
+├── compose.yaml
+├── Dockerfile
+├── pyproject.toml
+├── requirements-dev.txt
+└── requirements.txt
 ```
 
-## Paso 2. Leer los endpoints
+Responsabilidad de cada archivo:
 
-Abre `app/__init__.py` y localiza:
-
-| Endpoint | Función |
+| Archivo | Responsabilidad |
 | --- | --- |
-| `GET /` | Muestra el nombre de la API y sus rutas |
-| `GET /health` | Informa estado, entorno y versión |
-| `GET /api/stages` | Devuelve las etapas del pipeline |
-| `GET /api/progress?completed=3` | Calcula el avance |
+| `app/__init__.py` | API Flask |
+| `Dockerfile` | Imagen ejecutable |
+| `compose.yaml` | Desarrollo local sin Kubernetes |
+| `k8s/app.yaml` | Deployment y Service internos |
+| `tests/unit` | Pruebas dentro del proceso Python |
+| `tests/regression` | Pruebas contra una API desplegada |
+| `cicd.yml` | Orquestación completa |
 
-No modifiques nada todavía.
+## Paso 2. Revisar la API
 
-# Parte 2 — Ejecutar la API localmente
+| Endpoint | Resultado |
+| --- | --- |
+| `GET /` | Nombre y rutas disponibles |
+| `GET /health` | Estado, entorno y versión |
+| `GET /api/stages` | Etapas del pipeline |
+| `GET /api/progress?completed=3` | Porcentaje de avance |
 
-## Paso 3. Comprobar Docker
+# Parte 2 — Comprobar la aplicación localmente
 
-Ejecuta:
-
-```bash
-docker --version
-docker compose version
-```
-
-Los dos comandos deben mostrar una versión. Si `docker compose` no existe,
-instala Docker Desktop o el plugin Docker Compose.
-
-## Paso 4. Levantar la API
-
-Ejecuta:
+## Paso 3. Levantar con Docker Compose
 
 ```bash
 docker compose up --build --wait
-```
-
-Qué debe ocurrir:
-
-1. Docker descarga la imagen base de Python.
-2. Instala Flask y Gunicorn.
-3. Construye la imagen local.
-4. Inicia el contenedor.
-5. Espera hasta que `/health` responda correctamente.
-6. Informa que el contenedor está `Healthy`.
-
-Comprueba el estado:
-
-```bash
-docker compose ps
-```
-
-Resultado esperado: el servicio `api` aparece iniciado y saludable.
-
-## Paso 5. Probar los endpoints
-
-Ejecuta:
-
-```bash
-curl http://localhost:8000/
-curl http://localhost:8000/health
-curl http://localhost:8000/api/stages
-curl "http://localhost:8000/api/progress?completed=3"
-```
-
-La última consulta debe devolver:
-
-```json
-{
-  "completed": 3,
-  "percentage": 60,
-  "total": 5
-}
-```
-
-Comprueba también un error controlado:
-
-```bash
-curl -i "http://localhost:8000/api/progress?completed=invalido"
-```
-
-Resultado esperado:
-
-```text
-HTTP/1.1 400 BAD REQUEST
-```
-
-## Paso 6. Revisar logs y detener
-
-Consulta los logs:
-
-```bash
-docker compose logs
-```
-
-Detén y elimina el entorno:
-
-```bash
-docker compose down
 ```
 
 Comprueba:
 
 ```bash
 docker compose ps
+curl http://localhost:8000/health
+curl http://localhost:8000/api/stages
+curl "http://localhost:8000/api/progress?completed=3"
 ```
 
-No debería quedar ningún contenedor del proyecto ejecutándose.
+Resultado esperado para `/health`:
 
-# Parte 3 — Ejecutar los controles localmente
-
-## Paso 7. Crear un entorno virtual
-
-En Linux o macOS:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
+```json
+{
+  "environment": "local",
+  "status": "ok",
+  "version": "development"
+}
 ```
-
-En PowerShell:
-
-```powershell
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-Instala las dependencias:
-
-```bash
-pip install -r requirements-dev.txt
-```
-
-## Paso 8. Ejecutar el análisis estático
-
-Primero, Ruff:
-
-```bash
-ruff check .
-ruff format --check .
-```
-
-Ruff revisa errores de Python, imports, convenciones y formato.
-
-Después, Bandit:
-
-```bash
-bandit --recursive app
-```
-
-Bandit busca patrones de código potencialmente inseguros.
-
-Resultado esperado: ambos controles terminan sin errores.
-
-## Paso 9. Ejecutar unit tests
-
-```bash
-pytest -v tests/unit
-```
-
-Resultado esperado:
-
-```text
-8 passed
-```
-
-Estos tests importan Flask y llaman a la aplicación dentro del proceso de
-Pytest. Todavía no prueban un contenedor desplegado.
-
-## Paso 10. Ejecutar regresión contra un despliegue
-
-Vuelve a levantar la API:
-
-```bash
-docker compose up --build --wait
-```
-
-En otra terminal, activa el entorno virtual y ejecuta:
-
-```bash
-BASE_URL=http://localhost:8000 pytest -v -m regression tests/regression
-```
-
-En PowerShell:
-
-```powershell
-$env:BASE_URL="http://localhost:8000"
-pytest -v -m regression tests/regression
-```
-
-Resultado esperado:
-
-```text
-4 passed
-```
-
-Estos tests llaman a la aplicación por HTTP. Para ellos, la API es un sistema
-externo. Por eso pueden detectar problemas que un unit test no observa.
 
 Detén el entorno:
 
@@ -263,70 +152,252 @@ Detén el entorno:
 docker compose down
 ```
 
-# Parte 4 — Crear el repositorio en GitHub
+## Paso 4. Ejecutar los controles locales
 
-## Paso 11. Crear un repositorio vacío
+En Linux o macOS:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+```
+
+Ejecuta:
+
+```bash
+ruff check .
+ruff format --check .
+bandit --recursive app
+pytest -v tests/unit
+```
+
+Resultados esperados:
+
+```text
+Ruff: sin errores
+Bandit: sin hallazgos
+Pytest: 8 passed
+```
+
+# Parte 3 — Crear el cluster de Docker Desktop
+
+## Paso 5. Crear el cluster
+
+En Docker Desktop 4.51 o posterior:
+
+1. Abre **Kubernetes**.
+2. Selecciona **Create cluster**.
+3. Selecciona el provisioner `kind`.
+4. Usa un nodo para esta práctica.
+5. Selecciona **Create**.
+6. Espera hasta que el estado sea verde.
+
+## Paso 6. Seleccionar el contexto
+
+```bash
+kubectl config get-contexts
+kubectl config use-context docker-desktop
+kubectl cluster-info
+kubectl get nodes
+```
+
+Resultado esperado:
+
+- contexto actual: `docker-desktop`;
+- al menos un nodo;
+- nodo con estado `Ready`.
+
+## Paso 7. Validar permisos
+
+```bash
+kubectl auth can-i create namespaces
+kubectl auth can-i create deployments --namespace default
+kubectl auth can-i create services --namespace default
+```
+
+Los tres comandos deben responder:
+
+```text
+yes
+```
+
+## Paso 8. Comprobar que no hay exposición
+
+```bash
+kubectl get services --all-namespaces
+```
+
+Los servicios internos del sistema pueden aparecer, pero esta práctica no
+necesita ningún Ingress, NodePort o LoadBalancer.
+
+# Parte 4 — Crear el repositorio de GitHub
+
+## Paso 9. Crear un repositorio vacío
 
 En GitHub:
 
 1. Selecciona **New repository**.
-2. Asigna un nombre, por ejemplo `formatec-flask-cicd`.
-3. Selecciona **Public**.
-4. No agregues README, `.gitignore` ni licencia.
+2. Asigna un nombre, por ejemplo `formatec-flask-k8s`.
+3. Preferentemente usa un repositorio privado.
+4. No agregues README, licencia ni `.gitignore`.
 5. Selecciona **Create repository**.
 
-El repositorio público permite usar las funciones de protección necesarias con
-una cuenta gratuita.
+Un runner self-hosted no debe ejecutar código de colaboradores desconocidos.
+Para una clase, limita el repositorio a participantes confiables.
 
-## Paso 12. Asociar el repositorio local
-
-Reemplaza la URL por la de tu repositorio:
+## Paso 10. Asociar el repositorio
 
 ```bash
-git remote add origin https://github.com/USUARIO/formatec-flask-cicd.git
+git remote add origin https://github.com/USUARIO/formatec-flask-k8s.git
 git branch -M main
 git push -u origin main
 ```
 
-En GitHub, abre la pestaña **Actions**.
+La primera ejecución utilizará runners hospedados por GitHub. Producción se
+omite porque todavía no existe `PROD_DEPLOY_ENABLED=true`.
 
-Debes ver el workflow **CI/CD**. En esta primera ejecución deberían correr:
+# Parte 5 — Instalar el runner self-hosted
 
-1. `1 · Análisis estático y unit tests`;
-2. `2 · Construir imagen`;
-3. `4 · Publicar imagen`.
+## Paso 11. Abrir la configuración
 
-El job de producción se omite hasta que se configure
-`PROD_DEPLOY_ENABLED=true`.
+En el repositorio:
 
-## Paso 13. Comprobar la imagen publicada
+1. Abre **Settings**.
+2. Selecciona **Actions → Runners**.
+3. Selecciona **New self-hosted runner**.
+4. Selecciona macOS, Windows o Linux según tu equipo.
+5. Selecciona la arquitectura correcta.
 
-Cuando termine el workflow:
+GitHub mostrará comandos específicos y un token de registro temporal.
 
-1. Vuelve a la página principal del repositorio.
-2. Abre la sección **Packages**.
-3. Selecciona la imagen del repositorio.
-4. Busca una etiqueta con formato `sha-<commit>`.
-5. Comprueba que también existe `latest`.
+## Paso 12. Descargar el runner
 
-La etiqueta `latest` es cómoda para explorar. Producción utiliza la etiqueta
-del SHA porque identifica un artefacto exacto e inmutable.
+Crea una carpeta fuera del repositorio:
 
-# Parte 5 — Provocar un fallo de regresión en un PR
+```bash
+mkdir -p "$HOME/actions-runner-formatec"
+cd "$HOME/actions-runner-formatec"
+```
 
-Esta parte demuestra por qué no alcanza con análisis estático y unit tests.
+Ejecuta los comandos de descarga que GitHub muestra en pantalla.
 
-## Paso 14. Crear una rama
+No copies comandos de otro repositorio: el token es temporal y está asociado
+al repositorio actual.
+
+## Paso 13. Registrar la etiqueta `local-k8s`
+
+GitHub mostrará un comando similar a:
+
+```bash
+./config.sh --url https://github.com/USUARIO/REPOSITORIO --token TOKEN
+```
+
+Agrega la etiqueta:
+
+```bash
+./config.sh \
+  --url https://github.com/USUARIO/REPOSITORIO \
+  --token TOKEN \
+  --labels local-k8s
+```
+
+Cuando pregunte por el nombre, puedes usar:
+
+```text
+docker-desktop-k8s
+```
+
+Cuando pregunte por el work folder, acepta `_work`.
+
+## Paso 14. Iniciar el runner
+
+```bash
+./run.sh
+```
+
+La terminal debe mostrar:
+
+```text
+Listening for Jobs
+```
+
+En GitHub, dentro de **Settings → Actions → Runners**, el runner debe aparecer:
+
+```text
+Idle
+```
+
+Para la primera práctica, déjalo ejecutándose en esa terminal.
+
+## Paso 15. Validar herramientas desde el mismo usuario
+
+Abre otra terminal con el mismo usuario que ejecuta `run.sh`:
+
+```bash
+kubectl config current-context
+kubectl get nodes
+python3 --version
+curl --version
+```
+
+El contexto debe ser:
+
+```text
+docker-desktop
+```
+
+El runner usa el kubeconfig de ese usuario. Si ejecutas el runner con otro
+usuario o como servicio, ese usuario también debe tener acceso al contexto.
+
+# Parte 6 — Configurar GitHub
+
+## Paso 16. Crear el entorno development
+
+En **Settings → Environments**:
+
+1. Crea `development`.
+2. No agregues aprobación manual.
+3. No agregues secrets.
+
+El entorno dev se crea y destruye automáticamente por PR.
+
+## Paso 17. Crear el entorno production
+
+En **Settings → Environments**:
+
+1. Crea `production`.
+2. Agrega un **Required reviewer**.
+3. Si trabajan varias personas, activa **Prevent self-review**.
+4. Restringe el despliegue a la rama `main`.
+
+No necesitas secrets SSH, IPs, dominios ni credenciales manuales de GHCR. El
+workflow utiliza el `GITHUB_TOKEN` temporal del propio job.
+
+## Paso 18. Habilitar producción
+
+Abre:
+
+```text
+Settings → Secrets and variables → Actions → Variables
+```
+
+Crea:
+
+| Nombre | Valor |
+| --- | --- |
+| `PROD_DEPLOY_ENABLED` | `true` |
+
+# Parte 7 — Ejecutar un PR completo
+
+## Paso 19. Crear una rama
 
 ```bash
 git switch -c feature/romper-contrato
 ```
 
-## Paso 15. Introducir un cambio incompatible
+## Paso 20. Introducir una regresión
 
-Abre `app/__init__.py`.
-
-Dentro de la respuesta de `/api/progress`, cambia:
+En `app/__init__.py`, cambia:
 
 ```python
 "percentage": calculate_progress(completed, len(STAGES)),
@@ -338,9 +409,7 @@ por:
 "percent": calculate_progress(completed, len(STAGES)),
 ```
 
-Guarda el archivo.
-
-## Paso 16. Ejecutar los controles rápidos
+## Paso 21. Confirmar que los tests rápidos no la detectan
 
 ```bash
 ruff check .
@@ -351,13 +420,11 @@ pytest tests/unit
 
 Resultado esperado:
 
-- Ruff pasa.
-- Bandit pasa.
-- Los unit tests pasan.
+- análisis estático verde;
+- seguridad verde;
+- unit tests verdes.
 
-El código es válido y las pruebas internas no detectan el cambio de contrato.
-
-## Paso 17. Registrar y subir el cambio
+## Paso 22. Subir la rama
 
 ```bash
 git add app/__init__.py
@@ -365,69 +432,97 @@ git commit -m "feat: renombrar campo percentage"
 git push -u origin feature/romper-contrato
 ```
 
-## Paso 18. Abrir el pull request
+## Paso 23. Abrir el PR
 
 En GitHub:
 
 1. Abre **Pull requests**.
-2. Selecciona **New pull request**.
-3. Usa `main` como base.
-4. Usa `feature/romper-contrato` como compare.
-5. Selecciona **Create pull request**.
-6. Espera la ejecución de los checks.
+2. Crea un PR desde `feature/romper-contrato` hacia `main`.
+3. No lo marques como draft.
+4. Abre la pestaña **Checks**.
 
-## Paso 19. Observar el pipeline
+## Paso 24. Observar la publicación
 
-En la pestaña **Checks**, observa:
-
-1. El análisis estático queda verde.
-2. Los unit tests quedan verdes.
-3. La imagen se construye.
-4. Docker Compose levanta el entorno `development`.
-5. Los tests de regresión consultan la API.
-6. La regresión falla porque espera `percentage` y recibe `percent`.
-7. El entorno se elimina mediante el step de limpieza.
-8. **Listo para merge** queda rojo.
-
-Abre el log del test:
+Los primeros jobs deben mostrar:
 
 ```text
-test_progress_calculation_through_http
+1 · Análisis estático y unit tests   success
+2 · Construir imagen                 success
+3 · Publicar imagen                  success
 ```
 
-Busca la diferencia entre el JSON esperado y el recibido.
+En **Packages**, aparecerán:
 
-# Parte 6 — Corregir el cambio y habilitar el merge
-
-## Paso 20. Restaurar el contrato
-
-En `app/__init__.py`, vuelve a cambiar:
-
-```python
-"percent": calculate_progress(completed, len(STAGES)),
+```text
+sha-<commit>
+pr-<número>
 ```
 
-por:
+## Paso 25. Observar el namespace dev
+
+Mientras el job `4 · Kubernetes dev y regresión` está ejecutándose, abre una
+terminal local:
+
+```bash
+kubectl get namespaces --watch
+```
+
+Debe aparecer:
+
+```text
+dev-pr-<número>
+```
+
+En otra terminal:
+
+```bash
+kubectl get all --namespace dev-pr-<número>
+```
+
+Debes ver:
+
+- un Deployment;
+- dos Pods;
+- un Service `ClusterIP`;
+- ningún Ingress;
+- ningún puerto público.
+
+## Paso 26. Observar la regresión fallida
+
+El runner abre temporalmente:
+
+```text
+127.0.0.1:18080 → Service formatec-api:80
+```
+
+La regresión espera `percentage`, pero la API responde `percent`.
+
+Resultado:
+
+```text
+4 · Kubernetes dev y regresión   failure
+Listo para merge                 failure
+```
+
+Después del fallo:
+
+```bash
+kubectl get namespace dev-pr-<número>
+```
+
+El namespace debe estar eliminado o en estado `Terminating`.
+
+# Parte 8 — Corregir y habilitar el merge
+
+## Paso 27. Restaurar el contrato
+
+Vuelve a usar:
 
 ```python
 "percentage": calculate_progress(completed, len(STAGES)),
 ```
 
-## Paso 21. Verificar localmente
-
-```bash
-docker compose up --build --wait
-BASE_URL=http://localhost:8000 pytest -v -m regression tests/regression
-docker compose down
-```
-
-Resultado esperado:
-
-```text
-4 passed
-```
-
-## Paso 22. Subir la corrección
+## Paso 28. Subir la corrección
 
 ```bash
 git add app/__init__.py
@@ -435,398 +530,316 @@ git commit -m "fix: restaurar contrato de progress"
 git push
 ```
 
-No abras otro PR. El push actualiza el PR existente y vuelve a ejecutar el
-workflow.
+El mismo PR vuelve a ejecutar el workflow.
 
-## Paso 23. Comprobar “Listo para merge”
+## Paso 29. Comprobar el resultado
 
-Cuando termine:
-
-1. Abre el PR.
-2. Entra en **Checks**.
-3. Selecciona **Listo para merge**.
-4. Abre el resumen del job.
-
-Debe mostrar:
+El resumen **Listo para merge** debe mostrar:
 
 | Control | Resultado |
 | --- | --- |
 | Análisis y unit tests | success |
 | Imagen Docker | success |
-| Dev y regresión | success |
+| Publicación GHCR | success |
+| Kubernetes dev y regresión | success |
 
-Ahora el check queda verde.
+El namespace dev se elimina aunque la prueba termine correctamente.
 
-# Parte 7 — Proteger la rama principal
+# Parte 9 — Proteger main
 
-Realiza esta configuración después de que GitHub haya registrado por primera
-vez el check **Listo para merge**.
+## Paso 30. Crear una regla
 
-## Paso 24. Crear la regla de protección
+En **Settings → Rules → Rulesets** o **Branches**:
 
-En GitHub:
+1. Aplica la regla a `main`.
+2. Exige pull request.
+3. Exige el check **Listo para merge**.
+4. Exige que la rama esté actualizada.
+5. Opcionalmente exige aprobación de código.
+6. Bloquea pushes directos.
 
-1. Abre **Settings**.
-2. Entra en **Rules → Rulesets** o **Branches**.
-3. Crea una regla para la rama `main`.
-4. Activa **Require a pull request before merging**.
-5. Activa **Require status checks to pass**.
-6. Agrega el check **Listo para merge**.
-7. Activa **Require branches to be up to date before merging**.
-8. Opcionalmente exige una aprobación de código.
-9. Bloquea pushes directos a `main`.
-10. Guarda la regla.
+# Parte 10 — Desplegar production
 
-Desde este momento, un PR con regresión fallida no puede integrarse.
+## Paso 31. Hacer merge
 
-# Parte 8 — Hacer merge y publicar el candidato
-
-## Paso 25. Integrar el PR
-
-Con todos los checks verdes:
+Con el PR verde:
 
 1. Selecciona **Merge pull request**.
-2. Confirma el merge.
-3. Abre la pestaña **Actions**.
-4. Entra en la ejecución disparada por el push a `main`.
+2. Confirma.
+3. Abre **Actions**.
+4. Selecciona la ejecución de `main`.
 
-Observa que GitHub repite análisis, tests y build. Esto es intencional: el
-commit final de `main` puede diferir del commit original de la rama.
+## Paso 32. Observar la espera
 
-## Paso 26. Identificar el artefacto
-
-Dentro del job **4 · Publicar imagen**, busca:
+Los jobs hospedados por GitHub ejecutan:
 
 ```text
-ghcr.io/USUARIO/REPOSITORIO:sha-<SHA_COMPLETO>
+análisis → build → publicación
 ```
 
-Ese identificador representa el candidato exacto que puede promoverse a
-producción.
-
-Si no vas a realizar la parte de VM, puedes terminar aquí. Ya se completó:
+El job:
 
 ```text
-PR → dev → regresión → merge → imagen publicable
+5 · Kubernetes production
 ```
 
-# Parte 9 — Preparar producción en una VM
+queda esperando aprobación del entorno.
 
-Esta sección es para el docente o para quien quiera completar el despliegue
-real.
+Mientras espera:
 
-## Paso 27. Preparar la VM
+- el runner local todavía no recibió el job;
+- el cluster no cambió;
+- el job no accedió al cluster.
 
-La VM Linux debe tener:
-
-- acceso SSH;
-- Docker Engine;
-- plugin Docker Compose;
-- salida a `ghcr.io`;
-- un usuario autorizado para ejecutar Docker.
-
-En la VM, verifica:
-
-```bash
-docker --version
-docker compose version
-```
-
-Crea el directorio:
-
-```bash
-sudo mkdir -p /opt/formatec-api
-sudo chown "$USER":"$USER" /opt/formatec-api
-```
-
-## Paso 28. Elegir cómo exponer la API
-
-### Opción rápida para laboratorio
-
-En la VM:
-
-```bash
-cat > /opt/formatec-api/.env <<'EOF'
-BIND_ADDRESS=0.0.0.0
-APP_PORT=8000
-EOF
-```
-
-Abre el puerto `8000` en el firewall únicamente para las redes necesarias.
-
-La URL será:
-
-```text
-http://IP_DE_LA_VM:8000
-```
-
-### Opción recomendada
-
-No crees ese archivo. El Compose escuchará en `127.0.0.1:8000`.
-
-Configura Nginx, Caddy o Traefik para publicar HTTPS y enviar las solicitudes a:
-
-```text
-http://127.0.0.1:8000
-```
-
-## Paso 29. Crear credenciales para GHCR
-
-Crea un token de GitHub con permiso:
-
-```text
-read:packages
-```
-
-La VM usará ese token únicamente para descargar imágenes privadas.
-
-No guardes el token en el repositorio ni dentro del archivo Compose.
-
-## Paso 30. Obtener la identidad SSH del servidor
-
-Desde una red confiable:
-
-```bash
-ssh-keyscan -H IP_O_HOSTNAME_DE_LA_VM
-```
-
-Copia la línea completa. Se usará como `PROD_KNOWN_HOSTS`.
-
-# Parte 10 — Configurar el entorno production
-
-## Paso 31. Crear el entorno
+## Paso 33. Aprobar
 
 En GitHub:
 
-1. Abre **Settings → Environments**.
-2. Selecciona **New environment**.
-3. Escribe `production`.
-4. Guarda.
+1. Abre la ejecución.
+2. Selecciona **Review deployments**.
+3. Marca `production`.
+4. Selecciona **Approve and deploy**.
 
-## Paso 32. Agregar la aprobación
+## Paso 34. Observar el runner
 
-Dentro del entorno `production`:
-
-1. Activa **Required reviewers**.
-2. Selecciona la persona que aprobará.
-3. Si trabajan varias personas, activa **Prevent self-review**.
-4. Restringe el entorno para aceptar únicamente la rama `main`.
-
-El workflow podrá comenzar después del merge, pero el job no accederá a los
-secretos hasta recibir aprobación.
-
-## Paso 33. Crear las variables
-
-Primero abre **Settings → Secrets and variables → Actions → Variables** y crea
-esta variable de repositorio:
-
-| Variable | Valor |
-| --- | --- |
-| `PROD_DEPLOY_ENABLED` | `true` |
-
-El workflow evalúa esta variable antes de iniciar el job de producción. Por
-eso debe ser una variable del repositorio y no del entorno.
-
-Después, dentro de **Settings → Environments → production → Environment
-variables**, crea:
-
-| Variable | Ejemplo |
-| --- | --- |
-| `PROD_PATH` | `/opt/formatec-api` |
-| `PROD_URL` | `http://192.0.2.10:8000` |
-
-Si usas proxy HTTPS, `PROD_URL` debe contener la URL pública:
+La terminal del runner debe mostrar que recibió:
 
 ```text
-https://api.ejemplo.com
+5 · Kubernetes production
 ```
 
-## Paso 34. Crear los secrets
+El job:
 
-En **Environment secrets**, crea:
+1. selecciona `docker-desktop`;
+2. crea el namespace `production`;
+3. configura el pull secret temporal;
+4. aplica el Deployment y el Service;
+5. espera el RollingUpdate;
+6. abre `127.0.0.1:18081`;
+7. ejecuta la regresión;
+8. cierra el túnel.
 
-| Secret | Contenido |
-| --- | --- |
-| `PROD_HOST` | IP o hostname de la VM |
-| `PROD_USER` | Usuario SSH |
-| `PROD_SSH_KEY` | Clave privada SSH |
-| `PROD_KNOWN_HOSTS` | Salida confiable de `ssh-keyscan` |
-| `GHCR_USERNAME` | Usuario de GitHub |
-| `GHCR_TOKEN` | Token con `read:packages` |
-
-No escribas estos valores en el YAML.
-
-# Parte 11 — Ejecutar el primer despliegue productivo
-
-## Paso 35. Disparar nuevamente el workflow
-
-Como `PROD_DEPLOY_ENABLED` se configuró después del merge anterior:
-
-1. Abre **Actions**.
-2. Selecciona **CI/CD**.
-3. Selecciona **Run workflow**.
-4. Usa la rama `main`.
-5. Confirma.
-
-## Paso 36. Aprobar producción
-
-Cuando termine la publicación:
-
-1. El job **5 · Desplegar producción** queda esperando.
-2. Abre la ejecución.
-3. Selecciona **Review deployments**.
-4. Marca `production`.
-5. Selecciona **Approve and deploy**.
-
-Después de la aprobación, el workflow:
-
-1. configura SSH;
-2. copia `compose.prod.yaml` a la VM;
-3. inicia sesión en GHCR;
-4. descarga la imagen `sha-<commit>`;
-5. actualiza el contenedor con Docker Compose;
-6. espera el health check;
-7. consulta `$PROD_URL/health`.
-
-## Paso 37. Comprobar la versión
-
-Desde tu equipo:
+## Paso 35. Comprobar Kubernetes
 
 ```bash
-curl "$PROD_URL/health"
+kubectl get all --namespace production
+kubectl get deployment formatec-api --namespace production
+kubectl get pods --namespace production
+kubectl get service formatec-api --namespace production
 ```
 
 Resultado esperado:
+
+```text
+Deployment disponible
+2 Pods Ready
+Service tipo ClusterIP
+```
+
+Comprueba que la imagen coincide con `main`:
+
+```bash
+kubectl get deployment formatec-api \
+  --namespace production \
+  --output=jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+```
+
+## Paso 36. Consultar producción localmente
+
+Abre manualmente un túnel local:
+
+```bash
+kubectl port-forward \
+  --namespace production \
+  --address 127.0.0.1 \
+  service/formatec-api 8080:80
+```
+
+En otra terminal:
+
+```bash
+curl http://127.0.0.1:8080/health
+curl http://127.0.0.1:8080/api/stages
+```
+
+`/health` debe mostrar:
 
 ```json
 {
   "environment": "production",
   "status": "ok",
-  "version": "<SHA DEL COMMIT>"
+  "version": "<SHA de main>"
 }
 ```
 
-En la VM:
+Detén el túnel con `Ctrl+C`.
+
+# Parte 11 — Validar que no existe exposición
+
+## Paso 37. Revisar el Service
 
 ```bash
-cd /opt/formatec-api
-docker compose ps
-docker compose logs --tail=50
+kubectl get service formatec-api \
+  --namespace production \
+  --output=yaml
 ```
 
-# Parte 12 — Repetir el ciclo completo
+Busca:
 
-## Paso 38. Crear un cambio válido
+```yaml
+type: ClusterIP
+```
+
+No deben existir:
+
+```yaml
+type: NodePort
+type: LoadBalancer
+```
+
+## Paso 38. Buscar recursos expuestos
 
 ```bash
-git switch main
-git pull
-git switch -c feature/nueva-etapa
+kubectl get ingress --all-namespaces
+kubectl get services --all-namespaces
 ```
 
-Agrega una nueva etapa en `app/__init__.py`.
+La aplicación no debe aparecer como Ingress, NodePort o LoadBalancer.
 
-Actualiza:
+## Paso 39. Comprobar conexiones
 
-- el conteo esperado;
-- los unit tests;
-- los tests de regresión;
-- los porcentajes afectados.
-
-## Paso 39. Validar y abrir el PR
+Cuando no hay un `kubectl port-forward` activo:
 
 ```bash
-ruff check .
-ruff format --check .
-bandit --recursive app
-pytest tests/unit
-docker compose up --build --wait
-BASE_URL=http://localhost:8000 pytest -m regression tests/regression
-docker compose down
-git add .
-git commit -m "feat: agregar nueva etapa"
-git push -u origin feature/nueva-etapa
+curl http://127.0.0.1:8080/health
 ```
 
-Abre el PR y espera **Listo para merge**.
+La conexión debe fallar. Kubernetes continúa ejecutando la API, pero no existe
+un camino desde el host hasta el Service.
 
-## Paso 40. Promover a producción
+# Parte 12 — Actualización y rollback
 
-1. Revisa el PR.
-2. Confirma todos los checks verdes.
-3. Haz merge.
-4. Espera la nueva imagen `sha-<commit>`.
-5. Revisa el despliegue pendiente.
-6. Aprueba `production`.
-7. Consulta `/health`.
-8. Comprueba que el SHA coincide con el commit de `main`.
+## Paso 40. Revisar el historial
 
-# Guía de observación
+```bash
+kubectl rollout history deployment/formatec-api \
+  --namespace production
+```
 
-Durante la práctica, completa:
+## Paso 41. Observar una nueva promoción
 
-| Pregunta | Respuesta |
-| --- | --- |
-| ¿Qué evento inicia el pipeline del PR? | |
-| ¿Qué job ejecuta Ruff y Bandit? | |
-| ¿Por qué la regresión ocurre después del despliegue dev? | |
-| ¿Qué hace `needs` entre los jobs? | |
-| ¿Qué check se exige antes del merge? | |
-| ¿Qué etiqueta identifica la imagen exacta? | |
-| ¿Cuándo están disponibles los secrets de producción? | |
-| ¿Qué endpoint confirma la versión desplegada? | |
+En un nuevo PR:
 
-# Criterios de finalización
+1. modifica la API;
+2. actualiza los tests;
+3. espera dev y regresión;
+4. haz merge;
+5. aprueba production.
 
-La práctica está completa cuando puedes mostrar:
+Kubernetes crea una revisión nueva y reemplaza los pods gradualmente.
 
-- [ ] API local saludable mediante Docker Compose.
-- [ ] Ruff y Bandit en verde.
-- [ ] Ocho unit tests aprobados.
-- [ ] Cuatro tests de regresión aprobados.
-- [ ] Un PR con una regresión fallida.
-- [ ] La corrección del mismo PR.
-- [ ] El check **Listo para merge** en verde.
-- [ ] La protección de `main`.
-- [ ] Una imagen GHCR identificada por SHA.
-- [ ] El job de producción esperando aprobación.
-- [ ] `/health` respondiendo con `environment: production`.
-- [ ] El SHA de `/health` coincidiendo con el commit desplegado.
+## Paso 42. Rollback manual
+
+```bash
+kubectl rollout undo deployment/formatec-api \
+  --namespace production
+
+kubectl rollout status deployment/formatec-api \
+  --namespace production
+```
+
+El workflow hace este rollback automáticamente si la regresión post-deploy
+falla.
+
+# Seguridad del runner self-hosted
+
+El workflow contiene dos controles importantes:
+
+1. El job dev solo acepta PRs cuya rama pertenece al mismo repositorio.
+2. Producción solo acepta `main` y requiere el entorno protegido.
+
+Los PR desde forks externos no pueden publicar ni ejecutar el runner local.
+
+Aun así:
+
+- usa únicamente colaboradores confiables;
+- revisa cambios en `.github/workflows/` y `k8s/`;
+- no guardes credenciales personales en la máquina del runner;
+- usa un cluster dedicado al laboratorio;
+- detén el runner cuando no se utiliza;
+- no uses este runner para repositorios públicos con contribuciones abiertas.
 
 # Problemas frecuentes
 
-## El puerto 8000 está ocupado
+## El job queda en “Queued”
 
-Usa otro puerto:
+Comprueba:
+
+1. que `./run.sh` esté ejecutándose;
+2. que GitHub muestre el runner como `Idle`;
+3. que tenga la etiqueta `local-k8s`;
+4. que el equipo tenga salida HTTPS.
+
+## `docker-desktop` no existe
 
 ```bash
-APP_PORT=8080 docker compose up --build --wait
-BASE_URL=http://localhost:8080 pytest -m regression tests/regression
-APP_PORT=8080 docker compose down
+kubectl config get-contexts
 ```
 
-## El PR no despliega dev
+Si no aparece:
 
-Comprueba que:
+1. abre Docker Desktop;
+2. crea o inicia el cluster Kubernetes;
+3. espera el estado verde.
 
-- el PR apunta a `main`;
-- no está en modo draft;
-- el análisis estático terminó correctamente;
-- los unit tests pasaron;
-- la construcción de la imagen pasó.
+## El runner no accede a Kubernetes
 
-## “Listo para merge” queda rojo
+Ejecuta con el mismo usuario del runner:
 
-Abre el resumen del job. Mostrará cuál de estos controles falló:
+```bash
+kubectl config current-context
+kubectl get nodes
+```
 
-- análisis y unit tests;
-- construcción de la imagen;
-- dev y regresión.
+Si el runner se instaló como servicio, comprueba qué usuario ejecuta el
+servicio y dónde busca su kubeconfig.
+
+## `ImagePullBackOff`
+
+```bash
+kubectl describe pod \
+  --namespace production \
+  --selector app=formatec-api
+```
+
+Comprueba:
+
+- que el job `3 · Publicar imagen` pasó;
+- que la imagen `sha-<commit>` existe;
+- que el package está vinculado al repositorio;
+- que `GITHUB_TOKEN` tiene permiso `packages: read`;
+- que Docker Desktop tiene salida a `ghcr.io`.
+
+## El namespace dev permanece
+
+```bash
+kubectl delete namespace dev-pr-NUMERO
+```
+
+Después revisa el step **Destruir el namespace efímero**.
+
+## El puerto local está ocupado
+
+Busca un `kubectl port-forward` anterior y detenlo. El workflow utiliza:
+
+```text
+18080 para dev
+18081 para production
+```
 
 ## Producción aparece omitida
 
-Comprueba que la variable de repositorio existe en **Settings → Secrets and
-variables → Actions**:
+Comprueba la variable de repositorio:
 
 ```text
 PROD_DEPLOY_ENABLED=true
@@ -834,34 +847,30 @@ PROD_DEPLOY_ENABLED=true
 
 ## Producción queda esperando
 
-Es el comportamiento esperado cuando el entorno requiere aprobación. Usa
-**Review deployments**.
+Es el comportamiento esperado. Selecciona **Review deployments** y aprueba el
+entorno `production`.
 
-## La VM no puede descargar la imagen
+# Criterios de finalización
 
-Comprueba:
-
-- `GHCR_USERNAME`;
-- que `GHCR_TOKEN` tenga `read:packages`;
-- que el package permita acceso al repositorio;
-- que la VM tenga salida a `ghcr.io`.
-
-## El health check de producción falla
-
-Desde la VM:
-
-```bash
-cd /opt/formatec-api
-docker compose ps
-docker compose logs
-curl http://127.0.0.1:8000/health
-```
-
-Si localmente funciona pero `PROD_URL` no responde, revisa firewall, proxy
-reverso, DNS y HTTPS.
+- [ ] Docker Desktop Kubernetes está activo.
+- [ ] El contexto es `docker-desktop`.
+- [ ] El runner `local-k8s` aparece online.
+- [ ] Ruff, Bandit y unit tests pasan.
+- [ ] El PR publica una imagen `pr-<número>`.
+- [ ] Aparece un namespace dev efímero.
+- [ ] La regresión bloquea un contrato incompatible.
+- [ ] El namespace dev se elimina.
+- [ ] **Listo para merge** queda verde después de corregir.
+- [ ] Production espera aprobación.
+- [ ] Production despliega dos pods.
+- [ ] La imagen desplegada coincide con el SHA de `main`.
+- [ ] El Service es `ClusterIP`.
+- [ ] No existe Ingress, NodePort ni LoadBalancer.
+- [ ] `/health` solo responde mientras existe un port-forward local.
 
 # Referencias
 
-- [Status checks](https://docs.github.com/en/pull-requests/reference/status-checks)
-- [Entornos y aprobaciones](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
-- [Publicación de imágenes en GHCR](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images)
+- [Kubernetes en Docker Desktop](https://docs.docker.com/desktop/use-desktop/kubernetes/)
+- [Runners self-hosted](https://docs.github.com/en/actions/reference/runners/self-hosted-runners)
+- [Seguridad de GitHub Actions](https://docs.github.com/en/actions/reference/security/secure-use)
+- [Secrets para registries privados](https://kubernetes.io/docs/reference/kubectl/generated/kubectl_create_secret_docker-registry/)
