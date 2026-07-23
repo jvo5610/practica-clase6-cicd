@@ -5,10 +5,10 @@ resources:
   - ../../k8s/base
 images:
   - name: formatec-api
-    newName: ghcr.io/replace/after-first-workflow
-    newTag: bootstrap
+    newName: ghcr.io/jvo5610/practica-clase6-cicd
+    newTag: sha-bae436664d05103e48d0c6a83fafe82f91cf9c41
 labels:
   - pairs:
-      app.kubernetes.io/version: bootstrap
+      app.kubernetes.io/version: sha-bae436664d05103e48d0c6a83fafe82f91cf9c41
     includeSelectors: false
 
