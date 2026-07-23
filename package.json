@@ -1,0 +1,18 @@
+{
+  "name": "formatec-practica-cicd",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Aplicación didáctica para practicar CI/CD con GitHub Actions y GitHub Pages.",
+  "scripts": {
+    "lint": "node scripts/lint.mjs",
+    "test": "node --test",
+    "build": "node scripts/build.mjs",
+    "start": "node scripts/serve.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
+
