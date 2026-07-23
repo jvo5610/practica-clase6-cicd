@@ -239,55 +239,9 @@ Para practicar aprobación manual:
 1. Agrega tu usuario como **Required reviewer**.
 2. No actives **Prevent self-review** si trabajas solo.
 
-# 6. Instalar Argo CD automáticamente
+# 6. Ejecutar CI por primera vez
 
-El script:
-
-1. verifica Docker, Git y Kubernetes;
-2. selecciona `docker-desktop`;
-3. crea la rama remota `gitops`;
-4. instala Argo CD `v3.4.5`;
-5. espera todos los componentes;
-6. registra el fork como repositorio observado;
-7. crea la Application `formatec-production`.
-
-## Paso 13. Ejecutar el bootstrap
-
-Desde la raíz del repositorio:
-
-```bash
-./scripts/bootstrap-argocd.sh
-```
-
-La primera instalación puede tardar varios minutos.
-
-## Paso 14. Comprobar Argo CD
-
-```bash
-kubectl get pods --namespace argocd
-kubectl get applications --namespace argocd
-```
-
-Los pods de Argo CD deben quedar `Running`.
-
-La aplicación puede aparecer inicialmente como `OutOfSync` o `Degraded`. Es
-correcto: todavía no existe una imagen publicada por tu fork.
-
-## Paso 15. Confirmar la rama GitOps
-
-```bash
-git ls-remote --heads origin gitops
-```
-
-Debe mostrar una referencia:
-
-```text
-refs/heads/gitops
-```
-
-# 7. Ejecutar CI por primera vez
-
-## Paso 16. Iniciar manualmente el workflow
+## Paso 13. Iniciar manualmente el workflow
 
 En GitHub:
 
@@ -297,7 +251,7 @@ En GitHub:
 4. Elige `main`.
 5. Confirma.
 
-## Paso 17. Observar análisis y unit tests
+## Paso 14. Observar análisis y unit tests
 
 Abre el job:
 
@@ -313,7 +267,7 @@ Bandit
 8 unit tests
 ```
 
-## Paso 18. Observar Docker Compose
+## Paso 15. Observar Docker Compose
 
 Abre:
 
@@ -335,7 +289,7 @@ Resultado esperado:
 4 passed
 ```
 
-## Paso 19. Observar la publicación
+## Paso 16. Observar la publicación
 
 Abre:
 
@@ -350,14 +304,14 @@ ghcr.io/TU_USUARIO/practica-clase6-cicd:sha-<commit>
 ghcr.io/TU_USUARIO/practica-clase6-cicd:latest
 ```
 
-# 8. Hacer pública la imagen
+# 7. Hacer pública la imagen
 
 GHCR crea el primer package como privado. Argo CD no tiene credenciales
 personales, por lo que la imagen debe ser pública.
 
 Este paso se realiza una sola vez por fork.
 
-## Paso 20. Cambiar la visibilidad
+## Paso 17. Cambiar la visibilidad
 
 Después de terminar el job de publicación:
 
@@ -379,9 +333,9 @@ Comprueba sin autenticación:
 docker pull ghcr.io/TU_USUARIO/practica-clase6-cicd:latest
 ```
 
-# 9. Promover a producción
+# 8. Confirmar la promoción
 
-## Paso 21. Aprobar si configuraste reviewer
+## Paso 18. Aprobar si configuraste reviewer
 
 Si el job:
 
@@ -398,7 +352,7 @@ está esperando:
 
 Si no configuraste reviewer, el job continúa automáticamente.
 
-## Paso 22. Revisar el commit GitOps
+## Paso 19. Revisar el commit GitOps
 
 El job modifica en la rama `gitops`:
 
@@ -417,6 +371,54 @@ git show origin/gitops:gitops/production/kustomization.yaml
 ```
 
 No cambies tu rama local a `gitops`.
+
+# 9. Instalar Argo CD automáticamente
+
+Primero se publica la imagen y se actualiza `gitops`; recién entonces se
+registra la aplicación. Así Argo CD nunca intenta desplegar el valor provisional
+del repositorio.
+
+El script:
+
+1. verifica Docker, Git y Kubernetes;
+2. selecciona `docker-desktop`;
+3. comprueba que `gitops` ya contiene una imagen promovida;
+4. instala Argo CD `v3.4.5`;
+5. espera todos los componentes;
+6. registra el fork como repositorio observado;
+7. crea la Application `formatec-production`.
+
+## Paso 20. Ejecutar el bootstrap
+
+Desde la raíz del repositorio:
+
+```bash
+./scripts/bootstrap-argocd.sh
+```
+
+La primera instalación puede tardar varios minutos. Si la promoción aún no
+terminó, el script se detiene antes de crear la Application y explica qué falta.
+
+## Paso 21. Comprobar Argo CD
+
+```bash
+kubectl get pods --namespace argocd
+kubectl get applications --namespace argocd
+```
+
+Los pods de Argo CD deben quedar `Running`.
+
+## Paso 22. Confirmar la rama GitOps
+
+```bash
+git ls-remote --heads origin gitops
+```
+
+Debe mostrar una referencia:
+
+```text
+refs/heads/gitops
+```
 
 # 10. Esperar la entrega continua
 

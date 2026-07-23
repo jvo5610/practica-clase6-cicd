@@ -29,7 +29,7 @@ normalize_repo_url() {
   esac
 }
 
-for command_name in docker git kubectl sed; do
+for command_name in docker git grep kubectl sed; do
   require_command "$command_name"
 done
 
@@ -57,6 +57,20 @@ fi
 if ! git ls-remote --exit-code --heads origin gitops >/dev/null 2>&1; then
   echo "Creando la rama remota gitops..."
   git push origin refs/heads/main:refs/heads/gitops
+fi
+
+git fetch --quiet origin gitops
+gitops_manifest="$(
+  git show FETCH_HEAD:gitops/production/kustomization.yaml
+)"
+
+if grep --quiet \
+  --regexp='replace/after-first-workflow' \
+  --regexp='newTag: bootstrap' \
+  <<<"$gitops_manifest"; then
+  echo "La rama gitops todavía contiene la imagen provisional." >&2
+  echo "Ejecuta CI/CD sobre main, espera el job de promoción y vuelve a intentar." >&2
+  exit 1
 fi
 
 echo "Instalando Argo CD $ARGOCD_VERSION..."
